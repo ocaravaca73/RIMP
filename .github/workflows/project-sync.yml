@@ -25,11 +25,13 @@ jobs:
             const repo = context.repo.repo;
 
             // 1) Issue/PR del evento
-            const content = context.payload.issue ?? context.payload.pull_request;
+            const issue = context.payload.issue;
+            const pr = context.payload.pull_request;
+            const content = issue ?? pr;
             if (!content) { core.info('No issue/PR in event; exit.'); return; }
             const contentId = content.node_id;
 
-            // 2) Labels (con fallback REST por si vienen vacíos en el payload)
+            // 2) Labels (con fallback REST)
             let labels = (content.labels || []).map(l => (typeof l === 'string' ? l : l.name));
             if (!labels.length) {
               const { data } = await github.rest.issues.listLabelsOnIssue({
@@ -67,15 +69,12 @@ jobs:
             if (!project) { core.setFailed(`Project "${projectTitle}" not found for owner ${owner}.`); return; }
 
             const fields = project.fields.nodes;
-            const F = (name) => fields.find(f => f.name === name);
-            const F_TYPE     = F('Type');
-            const F_PRIORITY = F('Priority');
-            if (!F_TYPE || !F_PRIORITY) {
-              core.setFailed('Missing Project fields: ensure "Type" and "Priority" exist as Single-select.');
-              return;
-            }
+            const findField = (name) => fields.find(f => f.name === name);
+            const F_TYPE = findField('Type');
+            const F_PRIORITY = findField('Priority');
+            if (!F_TYPE || !F_PRIORITY) { core.setFailed('Missing fields: Type/Priority'); return; }
 
-            // 4) Localizar item existente en el Project
+            // 4) Localizar si ya está en el Project
             const qFindItem = `
               query($contentId: ID!) {
                 node(id: $contentId) {
@@ -95,7 +94,7 @@ jobs:
               return hit?.id;
             }
 
-            // 5) Asegurar que el item está en el Project (añadir si no existe)
+            // 5) Asegurar item en el Project (add si no existe)
             async function ensureItemId() {
               let itemId = await findExistingItemId();
               if (itemId) return itemId;
@@ -109,20 +108,25 @@ jobs:
                 const addRes = await github.graphql(addItemMut, { projectId: project.id, contentId });
                 return addRes.addProjectV2ItemById.item.id;
               } catch (e) {
-                core.info(`addProjectV2ItemById failed: ${e.message}`);
-                itemId = await findExistingItemId();
-                if (itemId) return itemId;
-                core.setFailed('Could not add or locate the Project item for this content.');
+                core.info(\`addProjectV2ItemById failed: \${e.message}\`);
+                // Reintenta por si ya estaba
+                const retry = await findExistingItemId();
+                if (retry) return retry;
+                core.setFailed('Could not add or locate Project item'); 
                 return null;
               }
             }
             const itemId = await ensureItemId();
             if (!itemId) return;
 
-            // Helpers
-            const getSelectId = (field, name) => field?.options?.find(o => o.name === name)?.id;
-            const updateSelect = async (field, optionId) => {
-              if (!field || !optionId) return;
+            // 6) Helpers para actualizar SingleSelect
+            function getSelectId(field, name) {
+              return field?.options?.find(o => o.name === name)?.id;
+            }
+            async function updateSelectByName(field, optionName) {
+              if (!field || !optionName) return;
+              const optionId = getSelectId(field, optionName);
+              if (!optionId) return;
               const m = `
                 mutation($projectId:ID!, $itemId:ID!, $fieldId:ID!, $opt:String!) {
                   updateProjectV2ItemFieldValue(input:{
@@ -130,4 +134,36 @@ jobs:
                     value:{ singleSelectOptionId:$opt }
                   }) { projectV2Item { id } }
                 }`;
-              await github.graphql(m, { projectId:
+              await github.graphql(m, {
+                projectId: project.id,
+                itemId,
+                fieldId: field.id,
+                opt: optionId
+              });
+            }
+
+            // 7) Mapeos mínimos labels → valores
+            const typeMap = {
+              'type:feature': 'Feature',
+              'type:spike':   'Spike',
+              'type:task':    'Task',
+              'type:bug':     'Bug',
+              'type:chore':   'Chore'
+            };
+
+            // TYPE
+            for (const [lbl, val] of Object.entries(typeMap)) {
+              if (labels.includes(lbl)) { 
+                await updateSelectByName(F_TYPE, val);
+                break; 
+              }
+            }
+
+            // PRIORITY (labels prio:P0..P3)
+            const prioLbl = labels.find(l => /^prio:P[0-3]$/i.test(l));
+            if (prioLbl) {
+              const prio = prioLbl.split(':')[1].toUpperCase(); // P0..P3
+              await updateSelectByName(F_PRIORITY, prio);
+            }
+
+            core.info('✓ Updated Project fields (Type, Priority) from labels.');
