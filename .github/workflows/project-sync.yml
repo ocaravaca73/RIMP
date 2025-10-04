@@ -50,9 +50,7 @@ jobs:
                     }
                   }
                 }
-              }
-            }`;
-
+              }`;
             const prjRes = await github.graphql(qProject, { owner, title: projectTitle });
             const project = prjRes.user?.projectsV2?.nodes?.find(p => p.title === projectTitle);
             if (!project) {
