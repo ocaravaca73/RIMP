@@ -32,18 +32,42 @@ jobs:
                 user(login: $owner) {
                   projectsV2(first: 20, query: $title) {
                     nodes {
-                      id title
+                      id
+                      title
                       fields(first: 50) {
                         nodes {
-                          __typename id name
-                          ... on ProjectV2SingleSelectField { options { id name } }
-                          ... on ProjectV2IterationField { configuration { iterations { id title startDate duration } } }
-                        }
+                          __typename
+                          # Single-select (Type, Priority, Area, etc.)
+                          ... on ProjectV2SingleSelectField {
+                            id
+                            name
+                            options { id name }
+                          }
+                          # Iteration (Sprint (2w)) — su configuration es un UNION, se fragmenta:
+                          ... on ProjectV2IterationField {
+                            id
+                            name
+                            configuration {
+                              ... on ProjectV2IterationFieldConfiguration {
+                                iterations { id title startDate duration }
+                              }
+                            }
+                          }
+                          # Number (Estimate (pts), RICE si lo usáramos como número)
+                          ... on ProjectV2NumberField {
+                            id
+                            name
+                          }
+                          # (Opcional) por si más adelante usamos estos tipos:
+                          ... on ProjectV2TextField { id name }
+                          ... on ProjectV2DateField { id name }
                       }
                     }
                   }
                 }
-              }`;
+              }
+            }`;
+
             const prjRes = await github.graphql(qProject, { owner, title: projectTitle });
             const project = prjRes.user.projectsV2.nodes.find(p => p.title === projectTitle);
             if (!project) core.setFailed(`Project "${projectTitle}" not found for owner ${owner}.`);
