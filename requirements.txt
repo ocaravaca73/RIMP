@@ -1,0 +1,3 @@
+# Python requirements for RIMP telemetry system
+# No external dependencies required for core functionality
+# All tests use standard library unittest module
