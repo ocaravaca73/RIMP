@@ -1,0 +1,13 @@
+{
+  "enabled": true,
+  "source": "rimp",
+  "buffer_size": 1000,
+  "retention_limit": 10000,
+  "export_format": "json",
+  "export_path": "./telemetry_data",
+  "custom_settings": {
+    "log_level": "INFO",
+    "enable_compression": false,
+    "batch_size": 100
+  }
+}
