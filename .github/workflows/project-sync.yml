@@ -22,15 +22,25 @@ jobs:
           script: |
             const owner = process.env.PROJECT_OWNER;
             const projectTitle = process.env.PROJECT_TITLE;
+            const repo = context.repo.repo;
 
-            // 1) Tomar issue/PR y labels
+            // 1) Tomar issue/PR del evento
             const content = context.payload.issue ?? context.payload.pull_request;
-            if (!content) { core.info('No issue/PR in event'); return; }
+            if (!content) { core.info('No issue/PR in event; exiting.'); return; }
             const contentId = content.node_id;
-            let labels = (content.labels || []).map(l => (typeof l === 'string' ? l : l.name));
-            labels = labels.map(s => s.trim());
 
-            // 2) Buscar el Project y sus campos (SIN Iteration para evitar el union)
+            // 2) Labels del evento (con fallback a REST por si vienen vacíos)
+            let labels = (content.labels || []).map(l => (typeof l === 'string' ? l : l.name));
+            if (!labels.length) {
+              const { data } = await github.rest.issues.listLabelsOnIssue({
+                owner, repo, issue_number: content.number
+              });
+              labels = data.map(l => l.name);
+            }
+            labels = labels.map(s => s.trim());
+            core.info(`Labels: ${labels.join(', ') || '(none)'}`);
+
+            // 3) Obtener el Project y sus campos (sin Iteration para evitar unions)
             const qProject = `
               query($owner:String!, $title:String!) {
                 user(login: $owner) {
@@ -60,28 +70,57 @@ jobs:
 
             const fields = project.fields.nodes;
             const F = (name) => fields.find(f => f.name === name);
-            const F_TYPE = F('Type');
+            const F_TYPE     = F('Type');
             const F_PRIORITY = F('Priority');
-            const F_AREA = F('Area');
+            const F_AREA     = F('Area');
             const F_ESTIMATE = F('Estimate (pts)');
 
-            // 3) Añadir el item al Project (idempotente)
-            const addItemMut = `
-              mutation($projectId:ID!, $contentId:ID!) {
-                addProjectV2ItemById(input:{projectId:$projectId, contentId:$contentId}) {
-                  item { id }
+            // 4) Localizar item existente en el Project (si ya fue auto-añadido)
+            const qFindItem = `
+              query($contentId: ID!, $projectId: ID!) {
+                node(id: $contentId) {
+                  __typename
+                  ... on Issue {
+                    projectItems(first: 50) { nodes { id project { id } } }
+                  }
+                  ... on PullRequest {
+                    projectItems(first: 50) { nodes { id project { id } } }
+                  }
                 }
               }`;
-            let itemId;
-            try {
-              const addRes = await github.graphql(addItemMut, { projectId: project.id, contentId });
-              itemId = addRes.addProjectV2ItemById.item.id;
-            } catch (e) {
-              // Si ya existe, intentamos localizar el item (best effort: reintento actualizando sin itemId no es posible)
-              core.info(`addProjectV2ItemById: ${e.message}`);
-              core.setFailed('El contenido ya podría estar en el Project; vuelve a etiquetar para reintentar.');
-              return;
+            async function findExistingItemId() {
+              const res = await github.graphql(qFindItem, { contentId, projectId: project.id });
+              const items = res.node?.projectItems?.nodes || [];
+              const hit = items.find(n => n.project?.id === project.id);
+              return hit?.id;
             }
+
+            // 5) Asegurar que el item está en el Project (add si no existe)
+            async function ensureItemId() {
+              let itemId = await findExistingItemId();
+              if (itemId) return itemId;
+              const addItemMut = `
+                mutation($projectId:ID!, $contentId:ID!) {
+                  addProjectV2ItemById(input:{projectId:$projectId, contentId:$contentId}) {
+                    item { id }
+                  }
+                }`;
+              try {
+                const addRes = await github.graphql(addItemMut, { projectId: project.id, contentId });
+                itemId = addRes.addProjectV2ItemById.item.id;
+                return itemId;
+              } catch (e) {
+                core.info(\`addProjectV2ItemById failed: \${e.message}\`);
+                // Reintenta localizar por si ya existía
+                itemId = await findExistingItemId();
+                if (itemId) return itemId;
+                core.setFailed('Could not add or locate the Project item for this content.');
+                return null;
+              }
+            }
+
+            const itemId = await ensureItemId();
+            if (!itemId) return;
 
             // Helpers de actualización
             const getSelectId = (field, name) => field?.options?.find(o => o.name === name)?.id;
@@ -108,7 +147,7 @@ jobs:
               await github.graphql(m, { projectId: project.id, itemId, fieldId: field.id, num: Number(number) });
             };
 
-            // 4) Mapeos de labels → valores
+            // 6) Mapeos de labels → valores
             const typeMap = {
               'type:feature': 'Feature',
               'type:spike':   'Spike',
@@ -156,4 +195,4 @@ jobs:
               await updateNumber(F_ESTIMATE, pts);
             }
 
-            core.info('Item added/updated in Project with fields from labels (Type, Priority, Area, Estimate).');
+            core.info('✓ Project item updated from labels (Type, Priority, Area, Estimate).');
