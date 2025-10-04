@@ -1,0 +1,116 @@
+name: Sync labels with Project fields
+on:
+  workflow_dispatch:
+  issues:
+    types: [opened, edited, labeled, unlabeled]
+  pull_request:
+    types: [opened, edited, labeled, unlabeled]
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    environment: copilot   # para usar el secreto del entorno
+    env:
+      PROJECT_OWNER: ${{ github.repository_owner }}
+      PROJECT_TITLE: RIMP – Product & Delivery
+    steps:
+      - name: Map labels → Project fields
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.COPILOT_MCP_GITHUB_PROJECT_TOKEN }}  # PAT classic con scope `project`
+          script: |
+            const owner = process.env.PROJECT_OWNER;
+            const projectTitle = process.env.PROJECT_TITLE;
+
+            const content = context.payload.issue ?? context.payload.pull_request;
+            if (!content) { core.info('No issue/PR in event'); return; }
+            const contentId = content.node_id;
+            const labels = (content.labels || []).map(l => (typeof l === 'string' ? l : l.name));
+
+            const qProject = `
+              query($owner:String!, $title:String!) {
+                user(login: $owner) {
+                  projectsV2(first: 20, query: $title) {
+                    nodes {
+                      id title
+                      fields(first: 50) {
+                        nodes {
+                          __typename id name
+                          ... on ProjectV2SingleSelectField { options { id name } }
+                          ... on ProjectV2IterationField { configuration { iterations { id title startDate duration } } }
+                        }
+                      }
+                    }
+                  }
+                }
+              }`;
+            const prjRes = await github.graphql(qProject, { owner, title: projectTitle });
+            const project = prjRes.user.projectsV2.nodes.find(p => p.title === projectTitle);
+            if (!project) core.setFailed(`Project "${projectTitle}" not found for owner ${owner}.`);
+
+            const fields = project.fields.nodes;
+            const F = name => fields.find(f => f.name === name);
+            const F_TYPE = F('Type'), F_PRIORITY = F('Priority'), F_AREA = F('Area'),
+                  F_SPRINT = F('Sprint (2w)'), F_ESTIMATE = F('Estimate (pts)');
+
+            const addItemMut = `
+              mutation($projectId:ID!, $contentId:ID!) {
+                addProjectV2ItemById(input:{projectId:$projectId, contentId:$contentId}) { item { id } }
+              }`;
+            const addRes = await github.graphql(addItemMut, { projectId: project.id, contentId });
+            const itemId = addRes.addProjectV2ItemById.item.id;
+
+            const getSelectId = (field, name) => field?.options?.find(o => o.name === name)?.id;
+            const updateSelect = async (field, optionId) => {
+              if (!field || !optionId) return;
+              const m = `mutation($projectId:ID!,$itemId:ID!,$fieldId:ID!,$opt:String!){
+                updateProjectV2ItemFieldValue(input:{projectId:$projectId,itemId:$itemId,fieldId:$fieldId,value:{singleSelectOptionId:$opt}}){projectV2Item{id}}
+              }`;
+              await github.graphql(m, { projectId: project.id, itemId, fieldId: field.id, opt: optionId });
+            };
+            const updateNumber = async (field, number) => {
+              if (!field || number == null) return;
+              const m = `mutation($projectId:ID!,$itemId:ID!,$fieldId:ID!,$num:Float!){
+                updateProjectV2ItemFieldValue(input:{projectId:$projectId,itemId:$itemId,fieldId:$fieldId,value:{number:$num}}){projectV2Item{id}}
+              }`;
+              await github.graphql(m, { projectId: project.id, itemId, fieldId: field.id, num: number });
+            };
+            const updateIteration = async (field, iterationId) => {
+              if (!field || !iterationId) return;
+              const m = `mutation($projectId:ID!,$itemId:ID!,$fieldId:ID!,$iter:String!){
+                updateProjectV2ItemFieldValue(input:{projectId:$projectId,itemId:$itemId,fieldId:$fieldId,value:{iterationId:$iter}}){projectV2Item{id}}
+              }`;
+              await github.graphql(m, { projectId: project.id, itemId, fieldId: field.id, iter: iterationId });
+            };
+
+            // Mapeos de labels
+            const typeMap = {'type:feature':'Feature','type:spike':'Spike','type:task':'Task','type:bug':'Bug','type:chore':'Chore'};
+            const areaMap = {'area:app':'App','area:backend':'Backend','area:realtime':'Realtime','area:telemetry':'Telemetry','area:data':'Data','area:ux':'UX','area:ops':'Ops'};
+
+            // TYPE
+            for (const [lbl,val] of Object.entries(typeMap)) {
+              if (labels.includes(lbl)) { await updateSelect(F_TYPE, getSelectId(F_TYPE, val)); break; }
+            }
+
+            // PRIORITY (labels prio:P0..P3)
+            const prioLbl = labels.find(l => /^prio:P[0-3]$/i.test(l));
+            if (prioLbl) { await updateSelect(F_PRIORITY, getSelectId(F_PRIORITY, prioLbl.split(':')[1].toUpperCase())); }
+
+            // AREA
+            for (const [lbl,val] of Object.entries(areaMap)) {
+              if (labels.includes(lbl)) { await updateSelect(F_AREA, getSelectId(F_AREA, val)); break; }
+            }
+
+            // SPRINT (si label sprint:current)
+            if (labels.includes('sprint:current') && F_SPRINT?.configuration?.iterations?.length) {
+              const today = new Date();
+              const iters = F_SPRINT.configuration.iterations.map(it => ({id: it.id, start: new Date(it.startDate), dur: it.duration*7}));
+              const current = iters.find(it => { const end = new Date(it.start); end.setDate(end.getDate()+it.dur); return today>=it.start && today<end; }) || iters[0];
+              if (current) await updateIteration(F_SPRINT, current.id);
+            }
+
+            // ESTIMATE (label estimate:X)
+            const estLbl = labels.find(l => /^estimate:\d+$/i.test(l));
+            if (estLbl) await updateNumber(F_ESTIMATE, Number(estLbl.split(':')[1]));
+
+            core.info('Item added/updated in Project with fields from labels.');
