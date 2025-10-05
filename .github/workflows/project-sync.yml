@@ -54,7 +54,14 @@ jobs:
                             options { id name }
                           }
                           ... on ProjectV2IterationField {
-                            configuration { iterations { id title } }
+                            configuration {
+                              ... on ProjectV2IterationFieldConfiguration {
+                                iterations {
+                                  id
+                                  title
+                                }
+                              }
+                            }
                           }
                         }
                       }
@@ -121,8 +128,7 @@ jobs:
                   'status:blocked': 'Blocked',
                   'status:in-review': 'In Review',
                   'status:done': 'Done'
-                },
-                type: 'select'
+                }
               },
               'Type': {
                 map: {
@@ -131,8 +137,7 @@ jobs:
                   'type:task': 'Task',
                   'type:bug': 'Bug',
                   'type:chore': 'Chore'
-                },
-                type: 'select'
+                }
               },
               'Priority': {
                 map: {
@@ -140,8 +145,7 @@ jobs:
                   'prio:p1': 'P1',
                   'prio:p2': 'P2',
                   'prio:p3': 'P3'
-                },
-                type: 'select'
+                }
               },
               'Area': {
                 map: {
@@ -152,12 +156,11 @@ jobs:
                   'area:data': 'Data',
                   'area:ux': 'UX',
                   'area:ops': 'Ops'
-                },
-                type: 'select'
+                }
               }
             };
 
-            for (const [fieldName, { map, type }] of Object.entries(mappings)) {
+            for (const [fieldName, { map }] of Object.entries(mappings)) {
               const field = findField(fieldName);
               for (const [label, value] of Object.entries(map)) {
                 if (labels.includes(label)) {
@@ -194,7 +197,9 @@ jobs:
             }
 
             const sprintField = fields.find(f => f.__typename === 'ProjectV2IterationField' && f.name === 'Sprint (2w)');
-            const currentIteration = sprintField?.configuration?.iterations?.find(i => i.title === 'Current');
+            const config = sprintField?.configuration;
+            const iterations = config?.iterations ?? config?.['iterations'];
+            const currentIteration = iterations?.find(i => i.title === 'Current');
             if (sprintField && currentIteration) {
               await updateField(sprintField, currentIteration.id, 'String!');
             }
