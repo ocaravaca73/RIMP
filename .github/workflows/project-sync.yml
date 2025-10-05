@@ -1,4 +1,4 @@
-Sync labels → Project fields
+name: Sync labels → Project fields
 
 on:
   workflow_dispatch:
@@ -10,39 +10,34 @@ on:
 jobs:
   sync:
     runs-on: ubuntu-latest
-    environment: copilot   # usa los secretos del entorno 'copilot'
+    environment: copilot
     env:
       PROJECT_OWNER: ${{ github.repository_owner }}
       PROJECT_TITLE: 'RIMP – Product & Delivery'
     steps:
-      - name: Update Project fields from labels
+      - name: Sync labels to ProjectV2 fields
         uses: actions/github-script@v7
         with:
-          github-token: ${{ secrets.COPILOT_MCP_GITHUB_PROJECT_TOKEN }}  # PAT classic con scope 'project'
+          github-token: ${{ secrets.COPILOT_MCP_GITHUB_PROJECT_TOKEN }}
           script: |
             const owner = process.env.PROJECT_OWNER;
             const projectTitle = process.env.PROJECT_TITLE;
             const repo = context.repo.repo;
-
-            // 1) Tomar issue/PR del evento
             const issue = context.payload.issue;
             const pr = context.payload.pull_request;
             const content = issue ?? pr;
             if (!content) { core.info('No issue/PR in event; exit.'); return; }
             const contentId = content.node_id;
 
-            // 2) Labels del ítem (fallback REST por si vienen vacíos en payload)
-            let labels = (content.labels || []).map(l => (typeof l === 'string' ? l : l.name));
+            let labels = (content.labels || []).map(l => typeof l === 'string' ? l : l.name);
             if (!labels.length) {
               const { data } = await github.rest.issues.listLabelsOnIssue({
                 owner, repo, issue_number: content.number
               });
               labels = data.map(l => l.name);
             }
-            labels = labels.map(s => s.trim());
-            core.info(`Labels: ${labels.join(', ') || '(none)'}`);
+            labels = labels.map(s => s.trim().toLowerCase());
 
-            // 3) Obtener el Project y SUS CAMPOS (solo tipos no-union)
             const qProject = `
               query($owner:String!, $title:String!) {
                 user(login: $owner) {
@@ -54,28 +49,10 @@ jobs:
                         nodes {
                           __typename
                           ... on ProjectV2SingleSelectField { id name options { id name } }
-                          ... on ProjectV2IterationField { id name currentIteration { id title } }
                           ... on ProjectV2NumberField       { id name }
                           ... on ProjectV2TextField         { id name }
                           ... on ProjectV2DateField         { id name }
-                        }
-                      }
-                    }
-                  }
-                }
-                organization(login: $owner) {
-                  projectsV2(first: 50, query: $title) {
-                    nodes {
-                      id
-                      title
-                      fields(first: 100) {
-                        nodes {
-                          __typename
-                          ... on ProjectV2SingleSelectField { id name options { id name } }
-                          ... on ProjectV2IterationField { id name currentIteration { id title } }
-                          ... on ProjectV2NumberField       { id name }
-                          ... on ProjectV2TextField         { id name }
-                          ... on ProjectV2DateField         { id name }
+                          ... on ProjectV2IterationField    { id name configuration { iterations { id title } } }
                         }
                       }
                     }
@@ -83,227 +60,140 @@ jobs:
                 }
               }`;
             const prjRes = await github.graphql(qProject, { owner, title: projectTitle });
-            const possibleProjects = [
-              ...(prjRes.user?.projectsV2?.nodes || []),
-              ...(prjRes.organization?.projectsV2?.nodes || [])
-            ];
-            const project = possibleProjects.find(p => p.title === projectTitle);
-            if (!project) { core.setFailed(`Project "${projectTitle}" not found for owner ${owner}.`); return; }
+            const project = prjRes.user?.projectsV2?.nodes?.find(p => p.title === projectTitle);
+            if (!project) { core.setFailed(`Project "${projectTitle}" not found.`); return; }
 
             const fields = project.fields.nodes;
-            const F = (name) => fields.find(f => f.name === name);
-            const F_STATUS   = F('Status');              // Single-select
-            const F_TYPE     = F('Type');                // Single-select
-            const F_PRIORITY = F('Priority');            // Single-select
-            const F_AREA     = F('Area');                // Single-select
-            const F_SPRINT   = F('Sprint (2w)');         // Iteration
-            const F_EST      = F('Estimate (pts)');      // Number
-            const F_REL      = F('Target Release');      // Text
-            const F_START    = F('Started At');          // Date
-            const F_FINISH   = F('Finished At');         // Date
-            const F_REACH    = F('Reach');               // Number
-            const F_IMPACT   = F('Impact');              // Number
-            const F_CONF     = F('Confidence');          // Number
-            const F_EFFORT   = F('Effort');              // Number
-            const F_RICE     = F('RICE');                // Number
+            const findField = name => fields.find(f => f.name === name);
+            const getSelectId = (field, name) => field?.options?.find(o => o.name === name)?.id;
 
-            // 4) Averiguar si ya está en el Project y añadir si falta
-            const qFindItem = `
-              query($contentId: ID!) {
-                node(id: $contentId) {
-                  __typename
-                  ... on Issue { projectItems(first: 50) { nodes { id project { id } } } }
-                  ... on PullRequest { projectItems(first: 50) { nodes { id project { id } } } }
-                }
-              }`;
-            async function findExistingItemId() {
+            const itemId = await (async () => {
+              const qFindItem = `
+                query($contentId: ID!) {
+                  node(id: $contentId) {
+                    ... on Issue { projectItems(first: 50) { nodes { id project { id } } } }
+                    ... on PullRequest { projectItems(first: 50) { nodes { id project { id } } } }
+                  }
+                }`;
               const res = await github.graphql(qFindItem, { contentId });
               const items = res.node?.projectItems?.nodes || [];
-              const hit = items.find(n => n.project?.id === project.id);
-              return hit?.id;
-            }
-            async function ensureItemId() {
-              let itemId = await findExistingItemId();
-              if (itemId) return itemId;
-              const addItemMut = `
+              const existing = items.find(n => n.project?.id === project.id);
+              if (existing) return existing.id;
+
+              const addItem = `
                 mutation($projectId:ID!, $contentId:ID!) {
                   addProjectV2ItemById(input:{projectId:$projectId, contentId:$contentId}) {
                     item { id }
                   }
                 }`;
-              try {
-                const addRes = await github.graphql(addItemMut, { projectId: project.id, contentId });
-                return addRes.addProjectV2ItemById.item.id;
-              } catch (e) {
-                core.info(`addProjectV2ItemById failed: ${e.message}`);
-                const retry = await findExistingItemId();
-                if (retry) return retry;
-                core.setFailed('Could not add or locate Project item'); 
-                return null;
-              }
-            }
-            const itemId = await ensureItemId();
+              const addRes = await github.graphql(addItem, { projectId: project.id, contentId });
+              return addRes.addProjectV2ItemById.item.id;
+            })();
+
             if (!itemId) return;
 
-            // 5) Helpers para actualizar campos
-            const getSelectId = (field, name) => field?.options?.find(o => o.name === name)?.id;
-
-            async function updateSelectByName(field, optionName) {
-              if (!field || !optionName) return;
-              const optionId = getSelectId(field, optionName);
-              if (!optionId) return;
-              const m = `
-                mutation($projectId:ID!, $itemId:ID!, $fieldId:ID!, $opt:String!) {
+            const updateField = async (field, value, type) => {
+              if (!field || value == null) return;
+              const mutation = `
+                mutation($projectId:ID!, $itemId:ID!, $fieldId:ID!, $value: ${type}) {
                   updateProjectV2ItemFieldValue(input:{
                     projectId:$projectId, itemId:$itemId, fieldId:$fieldId,
-                    value:{ singleSelectOptionId:$opt }
+                    value:{ ${type === 'Date!' ? 'date' : type === 'Float!' ? 'number' : type === 'String!' ? 'text' : 'singleSelectOptionId'}: $value }
                   }) { projectV2Item { id } }
                 }`;
-              await github.graphql(m, { projectId: project.id, itemId, fieldId: field.id, opt: optionId });
-            }
-
-            async function updateNumber(field, number) {
-              if (!field || number == null || Number.isNaN(Number(number))) return;
-              const m = `
-                mutation($projectId:ID!, $itemId:ID!, $fieldId:ID!, $num:Float!) {
-                  updateProjectV2ItemFieldValue(input:{
-                    projectId:$projectId, itemId:$itemId, fieldId:$fieldId,
-                    value:{ number:$num }
-                  }) { projectV2Item { id } }
-                }`;
-              await github.graphql(m, { projectId: project.id, itemId, fieldId: field.id, num: Number(number) });
-            }
-
-            async function updateText(field, text) {
-              if (!field || !text) return;
-              const m = `
-                mutation($projectId:ID!, $itemId:ID!, $fieldId:ID!, $txt:String!) {
-                  updateProjectV2ItemFieldValue(input:{
-                    projectId:$projectId, itemId:$itemId, fieldId:$fieldId,
-                    value:{ text:$txt }
-                  }) { projectV2Item { id } }
-                }`;
-              await github.graphql(m, { projectId: project.id, itemId, fieldId: field.id, txt: String(text).trim() });
-            }
-
-            async function updateDate(field, ymd) {
-              if (!field || !/^\d{4}-\d{2}-\d{2}$/.test(ymd || '')) return;
-              const m = `
-                mutation($projectId:ID!, $itemId:ID!,$fieldId:ID!, $d:Date!) {
-                  updateProjectV2ItemFieldValue(input:{
-                    projectId:$projectId, itemId:$itemId, fieldId:$fieldId,
-                    value:{ date:$d }
-                  }) { projectV2Item { id } }
-                }`;
-              await github.graphql(m, { projectId: project.id, itemId, fieldId: field.id, d: ymd });
-            }
-
-            async function updateIteration(field) {
-              if (!field) return;
-              const iterationId = field.currentIteration?.id;
-              if (!iterationId) return;
-              const m = `
-                mutation($projectId:ID!, $itemId:ID!, $fieldId:ID!, $it:ID!) {
-                  updateProjectV2ItemFieldValue(input:{
-                    projectId:$projectId, itemId:$itemId, fieldId:$fieldId,
-                    value:{ iterationId:$it }
-                  }) { projectV2Item { id } }
-                }`;
-              await github.graphql(m, { projectId: project.id, itemId, fieldId: field.id, it: iterationId });
-            }
-
-            // 6) Mapeos de labels → valores
-
-            // Status (usar slugs sin espacios)
-            const statusMap = {
-              'status:backlog':      'Backlog',
-              'status:ready':        'Ready',
-              'status:in-progress':  'In Progress',
-              'status:blocked':      'Blocked',
-              'status:in-review':    'In Review',
-              'status:done':         'Done'
+              await github.graphql(mutation, {
+                projectId: project.id,
+                itemId,
+                fieldId: field.id,
+                value: value
+              });
             };
 
-            // Type
-            const typeMap = {
-              'type:feature': 'Feature',
-              'type:spike':   'Spike',
-              'type:task':    'Task',
-              'type:bug':     'Bug',
-              'type:chore':   'Chore'
+            const mappings = {
+              'Status': {
+                map: {
+                  'status:backlog': 'Backlog',
+                  'status:ready': 'Ready',
+                  'status:in-progress': 'In Progress',
+                  'status:blocked': 'Blocked',
+                  'status:in-review': 'In Review',
+                  'status:done': 'Done'
+                },
+                type: 'select'
+              },
+              'Type': {
+                map: {
+                  'type:feature': 'Feature',
+                  'type:spike': 'Spike',
+                  'type:task': 'Task',
+                  'type:bug': 'Bug',
+                  'type:chore': 'Chore'
+                },
+                type: 'select'
+              },
+              'Priority': {
+                map: {
+                  'prio:p0': 'P0',
+                  'prio:p1': 'P1',
+                  'prio:p2': 'P2',
+                  'prio:p3': 'P3'
+                },
+                type: 'select'
+              },
+              'Area': {
+                map: {
+                  'area:app': 'App',
+                  'area:backend': 'Backend',
+                  'area:realtime': 'Realtime',
+                  'area:telemetry': 'Telemetry',
+                  'area:data': 'Data',
+                  'area:ux': 'UX',
+                  'area:ops': 'Ops'
+                },
+                type: 'select'
+              }
             };
 
-            // Area
-            const areaMap = {
-              'area:app':       'App',
-              'area:backend':   'Backend',
-              'area:realtime':  'Realtime',
-              'area:telemetry': 'Telemetry',
-              'area:data':      'Data',
-              'area:ux':        'UX',
-              'area:ops':       'Ops'
-            };
-
-            // Priority
-            const prioLabel = labels.find(l => /^prio:P[0-3]$/i.test(l));
-            if (F_PRIORITY && prioLabel) {
-              await updateSelectByName(F_PRIORITY, prioLabel.split(':')[1].toUpperCase()); // P0..P3
-            }
-
-            // Status
-            if (F_STATUS) {
-              for (const [lbl, val] of Object.entries(statusMap)) {
-                if (labels.includes(lbl)) { await updateSelectByName(F_STATUS, val); break; }
+            for (const [fieldName, { map, type }] of Object.entries(mappings)) {
+              const field = findField(fieldName);
+              for (const [label, value] of Object.entries(map)) {
+                if (labels.includes(label)) {
+                  const optionId = getSelectId(field, value);
+                  if (optionId) await updateField(field, optionId, 'String!');
+                  break;
+                }
               }
             }
 
-            // Type
-            if (F_TYPE) {
-              for (const [lbl, val] of Object.entries(typeMap)) {
-                if (labels.includes(lbl)) { await updateSelectByName(F_TYPE, val); break; }
+            const numericFields = ['Estimate (pts)', 'Reach', 'Impact', 'Confidence', 'Effort', 'RICE'];
+            for (const name of numericFields) {
+              const field = findField(name);
+              const label = labels.find(l => l.startsWith(name.toLowerCase().replace(/[^a-z]/g, '') + ':'));
+              if (field && label) {
+                const val = parseFloat(label.split(':')[1]);
+                if (!isNaN(val)) await updateField(field, val, 'Float!');
               }
             }
 
-            // Area
-            if (F_AREA) {
-              for (const [lbl, val] of Object.entries(areaMap)) {
-                if (labels.includes(lbl)) { await updateSelectByName(F_AREA, val); break; }
+            const textField = findField('Target Release');
+            const releaseLabel = labels.find(l => l.startsWith('release:'));
+            if (textField && releaseLabel) {
+              await updateField(textField, releaseLabel.split(':')[1], 'String!');
+            }
+
+            const dateFields = ['Started At', 'Finished At'];
+            for (const name of dateFields) {
+              const field = findField(name);
+              const label = labels.find(l => l.startsWith(name.toLowerCase().replace(/[^a-z]/g, '') + ':'));
+              if (field && label) {
+                await updateField(field, label.split(':')[1], 'Date!');
               }
             }
 
-            // Estimate (pts): label estimate:X
-            const estLabel = labels.find(l => /^estimate:\d+$/i.test(l));
-            if (F_EST && estLabel) {
-              await updateNumber(F_EST, Number(estLabel.split(':')[1]));
+            const sprintField = fields.find(f => f.__typename === 'ProjectV2IterationField' && f.name === 'Sprint (2w)');
+            const currentIteration = sprintField?.configuration?.iterations?.find(i => i.title === 'Current');
+            if (sprintField && currentIteration) {
+              await updateField(sprintField, currentIteration.id, 'String!');
             }
 
-            // Target Release: label release:TextoLibre
-            const relLabel = labels.find(l => /^release:.+/i.test(l));
-            if (F_REL && relLabel) {
-              await updateText(F_REL, relLabel.substring('release:'.length));
-            }
-
-            // Fechas: start:YYYY-MM-DD / finish:YYYY-MM-DD
-            const startLabel = labels.find(l => /^start:\d{4}-\d{2}-\d{2}$/i.test(l));
-            if (F_START && startLabel) { await updateDate(F_START, startLabel.split(':')[1]); }
-            const finishLabel = labels.find(l => /^finish:\d{4}-\d{2}-\d{2}$/i.test(l));
-            if (F_FINISH && finishLabel) { await updateDate(F_FINISH, finishLabel.split(':')[1]); }
-
-            // Métrica RICE y factores (opcional vía labels)
-            const reachLbl = labels.find(l => /^reach:\d+$/i.test(l));
-            if (F_REACH && reachLbl) await updateNumber(F_REACH, Number(reachLbl.split(':')[1]));
-            const impactLbl = labels.find(l => /^impact:\d+$/i.test(l));
-            if (F_IMPACT && impactLbl) await updateNumber(F_IMPACT, Number(impactLbl.split(':')[1]));
-            const confLbl = labels.find(l => /^confidence:\d+$/i.test(l));
-            if (F_CONF && confLbl) await updateNumber(F_CONF, Number(confLbl.split(':')[1]));
-            const effortLbl = labels.find(l => /^effort:\d+$/i.test(l));
-            if (F_EFFORT && effortLbl) await updateNumber(F_EFFORT, Number(effortLbl.split(':')[1]));
-            const riceLbl = labels.find(l => /^rice:\d+(\.\d+)?$/i.test(l));
-            if (F_RICE && riceLbl) await updateNumber(F_RICE, Number(riceLbl.split(':')[1]));
-
-            // Always set Sprint to Current
-            if (F_SPRINT) {
-              await updateIteration(F_SPRINT);
-            }
-
-            core.info('✓ Project fields updated from labels (sin unions).');
+            core.info('✓ Project fields updated successfully.');
