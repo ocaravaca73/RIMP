@@ -1,8 +1,17 @@
+
+
+
+
 # RIMP
 
 ## Project Management
 
 This repository includes tools and documentation for managing issues in GitHub Projects.
+
+> **The only source of truth for scheduling and project management is ** [Azure DevOps Boards – RIMP](<URL_A_TU_BOARD>)
+>
+> GitHub is only used for coding/PRs/CI. All the works ( epics/US/tasks**código/PRs/tasks/bugs/etc  lives in **ADO Boards**.
+
 
 ### Testing the Workflow
 
