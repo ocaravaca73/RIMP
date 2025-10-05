@@ -1,4 +1,4 @@
-name: Sync labels → Project fields
+Thought for 1m 27syamlname: Sync labels → Project fields
 
 on:
   workflow_dispatch:
@@ -54,6 +54,25 @@ jobs:
                         nodes {
                           __typename
                           ... on ProjectV2SingleSelectField { id name options { id name } }
+                          ... on ProjectV2IterationField { id name currentIteration { id title } }
+                          ... on ProjectV2NumberField       { id name }
+                          ... on ProjectV2TextField         { id name }
+                          ... on ProjectV2DateField         { id name }
+                        }
+                      }
+                    }
+                  }
+                }
+                organization(login: $owner) {
+                  projectsV2(first: 50, query: $title) {
+                    nodes {
+                      id
+                      title
+                      fields(first: 100) {
+                        nodes {
+                          __typename
+                          ... on ProjectV2SingleSelectField { id name options { id name } }
+                          ... on ProjectV2IterationField { id name currentIteration { id title } }
                           ... on ProjectV2NumberField       { id name }
                           ... on ProjectV2TextField         { id name }
                           ... on ProjectV2DateField         { id name }
@@ -64,7 +83,11 @@ jobs:
                 }
               }`;
             const prjRes = await github.graphql(qProject, { owner, title: projectTitle });
-            const project = prjRes.user?.projectsV2?.nodes?.find(p => p.title === projectTitle);
+            const possibleProjects = [
+              ...(prjRes.user?.projectsV2?.nodes || []),
+              ...(prjRes.organization?.projectsV2?.nodes || [])
+            ];
+            const project = possibleProjects.find(p => p.title === projectTitle);
             if (!project) { core.setFailed(`Project "${projectTitle}" not found for owner ${owner}.`); return; }
 
             const fields = project.fields.nodes;
@@ -73,6 +96,7 @@ jobs:
             const F_TYPE     = F('Type');                // Single-select
             const F_PRIORITY = F('Priority');            // Single-select
             const F_AREA     = F('Area');                // Single-select
+            const F_SPRINT   = F('Sprint (2w)');         // Iteration
             const F_EST      = F('Estimate (pts)');      // Number
             const F_REL      = F('Target Release');      // Text
             const F_START    = F('Started At');          // Date
@@ -111,7 +135,7 @@ jobs:
                 const addRes = await github.graphql(addItemMut, { projectId: project.id, contentId });
                 return addRes.addProjectV2ItemById.item.id;
               } catch (e) {
-                core.info(\`addProjectV2ItemById failed: \${e.message}\`);
+                core.info(`addProjectV2ItemById failed: ${e.message}`);
                 const retry = await findExistingItemId();
                 if (retry) return retry;
                 core.setFailed('Could not add or locate Project item'); 
@@ -172,6 +196,20 @@ jobs:
                   }) { projectV2Item { id } }
                 }`;
               await github.graphql(m, { projectId: project.id, itemId, fieldId: field.id, d: ymd });
+            }
+
+            async function updateIteration(field) {
+              if (!field) return;
+              const iterationId = field.currentIteration?.id;
+              if (!iterationId) return;
+              const m = `
+                mutation($projectId:ID!, $itemId:ID!, $fieldId:ID!, $it:ID!) {
+                  updateProjectV2ItemFieldValue(input:{
+                    projectId:$projectId, itemId:$itemId, fieldId:$fieldId,
+                    value:{ iterationId:$it }
+                  }) { projectV2Item { id } }
+                }`;
+              await github.graphql(m, { projectId: project.id, itemId, fieldId: field.id, it: iterationId });
             }
 
             // 6) Mapeos de labels → valores
@@ -262,5 +300,10 @@ jobs:
             if (F_EFFORT && effortLbl) await updateNumber(F_EFFORT, Number(effortLbl.split(':')[1]));
             const riceLbl = labels.find(l => /^rice:\d+(\.\d+)?$/i.test(l));
             if (F_RICE && riceLbl) await updateNumber(F_RICE, Number(riceLbl.split(':')[1]));
+
+            // Always set Sprint to Current
+            if (F_SPRINT) {
+              await updateIteration(F_SPRINT);
+            }
 
             core.info('✓ Project fields updated from labels (sin unions).');
