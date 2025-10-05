@@ -1,4 +1,4 @@
-name: Sync labels → Project fields (minimal)
+name: Sync labels → Project fields
 
 on:
   workflow_dispatch:
@@ -10,12 +10,12 @@ on:
 jobs:
   sync:
     runs-on: ubuntu-latest
-    environment: copilot   # usa secretos del entorno 'copilot'
+    environment: copilot   # usa los secretos del entorno 'copilot'
     env:
       PROJECT_OWNER: ${{ github.repository_owner }}
-      PROJECT_TITLE: RIMP – Product & Delivery
+      PROJECT_TITLE: 'RIMP – Product & Delivery'
     steps:
-      - name: Update Project fields from labels (Type, Priority)
+      - name: Update Project fields from labels
         uses: actions/github-script@v7
         with:
           github-token: ${{ secrets.COPILOT_MCP_GITHUB_PROJECT_TOKEN }}  # PAT classic con scope 'project'
@@ -24,14 +24,14 @@ jobs:
             const projectTitle = process.env.PROJECT_TITLE;
             const repo = context.repo.repo;
 
-            // 1) Issue/PR del evento
+            // 1) Tomar issue/PR del evento
             const issue = context.payload.issue;
             const pr = context.payload.pull_request;
             const content = issue ?? pr;
             if (!content) { core.info('No issue/PR in event; exit.'); return; }
             const contentId = content.node_id;
 
-            // 2) Labels (con fallback REST)
+            // 2) Labels del ítem (fallback REST por si vienen vacíos en payload)
             let labels = (content.labels || []).map(l => (typeof l === 'string' ? l : l.name));
             if (!labels.length) {
               const { data } = await github.rest.issues.listLabelsOnIssue({
@@ -42,7 +42,7 @@ jobs:
             labels = labels.map(s => s.trim());
             core.info(`Labels: ${labels.join(', ') || '(none)'}`);
 
-            // 3) Buscar el Project y SOLO campos SingleSelect (evitamos unions)
+            // 3) Obtener el Project y SUS CAMPOS (solo tipos no-union)
             const qProject = `
               query($owner:String!, $title:String!) {
                 user(login: $owner) {
@@ -53,11 +53,10 @@ jobs:
                       fields(first: 100) {
                         nodes {
                           __typename
-                          ... on ProjectV2SingleSelectField {
-                            id
-                            name
-                            options { id name }
-                          }
+                          ... on ProjectV2SingleSelectField { id name options { id name } }
+                          ... on ProjectV2NumberField       { id name }
+                          ... on ProjectV2TextField         { id name }
+                          ... on ProjectV2DateField         { id name }
                         }
                       }
                     }
@@ -69,22 +68,28 @@ jobs:
             if (!project) { core.setFailed(`Project "${projectTitle}" not found for owner ${owner}.`); return; }
 
             const fields = project.fields.nodes;
-            const findField = (name) => fields.find(f => f.name === name);
-            const F_TYPE = findField('Type');
-            const F_PRIORITY = findField('Priority');
-            if (!F_TYPE || !F_PRIORITY) { core.setFailed('Missing fields: Type/Priority'); return; }
+            const F = (name) => fields.find(f => f.name === name);
+            const F_STATUS   = F('Status');              // Single-select
+            const F_TYPE     = F('Type');                // Single-select
+            const F_PRIORITY = F('Priority');            // Single-select
+            const F_AREA     = F('Area');                // Single-select
+            const F_EST      = F('Estimate (pts)');      // Number
+            const F_REL      = F('Target Release');      // Text
+            const F_START    = F('Started At');          // Date
+            const F_FINISH   = F('Finished At');         // Date
+            const F_REACH    = F('Reach');               // Number
+            const F_IMPACT   = F('Impact');              // Number
+            const F_CONF     = F('Confidence');          // Number
+            const F_EFFORT   = F('Effort');              // Number
+            const F_RICE     = F('RICE');                // Number
 
-            // 4) Localizar si ya está en el Project
+            // 4) Averiguar si ya está en el Project y añadir si falta
             const qFindItem = `
               query($contentId: ID!) {
                 node(id: $contentId) {
                   __typename
-                  ... on Issue {
-                    projectItems(first: 50) { nodes { id project { id } } }
-                  }
-                  ... on PullRequest {
-                    projectItems(first: 50) { nodes { id project { id } } }
-                  }
+                  ... on Issue { projectItems(first: 50) { nodes { id project { id } } } }
+                  ... on PullRequest { projectItems(first: 50) { nodes { id project { id } } } }
                 }
               }`;
             async function findExistingItemId() {
@@ -93,8 +98,6 @@ jobs:
               const hit = items.find(n => n.project?.id === project.id);
               return hit?.id;
             }
-
-            // 5) Asegurar item en el Project (add si no existe)
             async function ensureItemId() {
               let itemId = await findExistingItemId();
               if (itemId) return itemId;
@@ -109,7 +112,6 @@ jobs:
                 return addRes.addProjectV2ItemById.item.id;
               } catch (e) {
                 core.info(\`addProjectV2ItemById failed: \${e.message}\`);
-                // Reintenta por si ya estaba
                 const retry = await findExistingItemId();
                 if (retry) return retry;
                 core.setFailed('Could not add or locate Project item'); 
@@ -119,10 +121,9 @@ jobs:
             const itemId = await ensureItemId();
             if (!itemId) return;
 
-            // 6) Helpers para actualizar SingleSelect
-            function getSelectId(field, name) {
-              return field?.options?.find(o => o.name === name)?.id;
-            }
+            // 5) Helpers para actualizar campos
+            const getSelectId = (field, name) => field?.options?.find(o => o.name === name)?.id;
+
             async function updateSelectByName(field, optionName) {
               if (!field || !optionName) return;
               const optionId = getSelectId(field, optionName);
@@ -134,15 +135,58 @@ jobs:
                     value:{ singleSelectOptionId:$opt }
                   }) { projectV2Item { id } }
                 }`;
-              await github.graphql(m, {
-                projectId: project.id,
-                itemId,
-                fieldId: field.id,
-                opt: optionId
-              });
+              await github.graphql(m, { projectId: project.id, itemId, fieldId: field.id, opt: optionId });
             }
 
-            // 7) Mapeos mínimos labels → valores
+            async function updateNumber(field, number) {
+              if (!field || number == null || Number.isNaN(Number(number))) return;
+              const m = `
+                mutation($projectId:ID!, $itemId:ID!, $fieldId:ID!, $num:Float!) {
+                  updateProjectV2ItemFieldValue(input:{
+                    projectId:$projectId, itemId:$itemId, fieldId:$fieldId,
+                    value:{ number:$num }
+                  }) { projectV2Item { id } }
+                }`;
+              await github.graphql(m, { projectId: project.id, itemId, fieldId: field.id, num: Number(number) });
+            }
+
+            async function updateText(field, text) {
+              if (!field || !text) return;
+              const m = `
+                mutation($projectId:ID!, $itemId:ID!, $fieldId:ID!, $txt:String!) {
+                  updateProjectV2ItemFieldValue(input:{
+                    projectId:$projectId, itemId:$itemId, fieldId:$fieldId,
+                    value:{ text:$txt }
+                  }) { projectV2Item { id } }
+                }`;
+              await github.graphql(m, { projectId: project.id, itemId, fieldId: field.id, txt: String(text).trim() });
+            }
+
+            async function updateDate(field, ymd) {
+              if (!field || !/^\d{4}-\d{2}-\d{2}$/.test(ymd || '')) return;
+              const m = `
+                mutation($projectId:ID!, $itemId:ID!,$fieldId:ID!, $d:Date!) {
+                  updateProjectV2ItemFieldValue(input:{
+                    projectId:$projectId, itemId:$itemId, fieldId:$fieldId,
+                    value:{ date:$d }
+                  }) { projectV2Item { id } }
+                }`;
+              await github.graphql(m, { projectId: project.id, itemId, fieldId: field.id, d: ymd });
+            }
+
+            // 6) Mapeos de labels → valores
+
+            // Status (usar slugs sin espacios)
+            const statusMap = {
+              'status:backlog':      'Backlog',
+              'status:ready':        'Ready',
+              'status:in-progress':  'In Progress',
+              'status:blocked':      'Blocked',
+              'status:in-review':    'In Review',
+              'status:done':         'Done'
+            };
+
+            // Type
             const typeMap = {
               'type:feature': 'Feature',
               'type:spike':   'Spike',
@@ -151,19 +195,72 @@ jobs:
               'type:chore':   'Chore'
             };
 
-            // TYPE
-            for (const [lbl, val] of Object.entries(typeMap)) {
-              if (labels.includes(lbl)) { 
-                await updateSelectByName(F_TYPE, val);
-                break; 
+            // Area
+            const areaMap = {
+              'area:app':       'App',
+              'area:backend':   'Backend',
+              'area:realtime':  'Realtime',
+              'area:telemetry': 'Telemetry',
+              'area:data':      'Data',
+              'area:ux':        'UX',
+              'area:ops':       'Ops'
+            };
+
+            // Priority
+            const prioLabel = labels.find(l => /^prio:P[0-3]$/i.test(l));
+            if (F_PRIORITY && prioLabel) {
+              await updateSelectByName(F_PRIORITY, prioLabel.split(':')[1].toUpperCase()); // P0..P3
+            }
+
+            // Status
+            if (F_STATUS) {
+              for (const [lbl, val] of Object.entries(statusMap)) {
+                if (labels.includes(lbl)) { await updateSelectByName(F_STATUS, val); break; }
               }
             }
 
-            // PRIORITY (labels prio:P0..P3)
-            const prioLbl = labels.find(l => /^prio:P[0-3]$/i.test(l));
-            if (prioLbl) {
-              const prio = prioLbl.split(':')[1].toUpperCase(); // P0..P3
-              await updateSelectByName(F_PRIORITY, prio);
+            // Type
+            if (F_TYPE) {
+              for (const [lbl, val] of Object.entries(typeMap)) {
+                if (labels.includes(lbl)) { await updateSelectByName(F_TYPE, val); break; }
+              }
             }
 
-            core.info('✓ Updated Project fields (Type, Priority) from labels.');
+            // Area
+            if (F_AREA) {
+              for (const [lbl, val] of Object.entries(areaMap)) {
+                if (labels.includes(lbl)) { await updateSelectByName(F_AREA, val); break; }
+              }
+            }
+
+            // Estimate (pts): label estimate:X
+            const estLabel = labels.find(l => /^estimate:\d+$/i.test(l));
+            if (F_EST && estLabel) {
+              await updateNumber(F_EST, Number(estLabel.split(':')[1]));
+            }
+
+            // Target Release: label release:TextoLibre
+            const relLabel = labels.find(l => /^release:.+/i.test(l));
+            if (F_REL && relLabel) {
+              await updateText(F_REL, relLabel.substring('release:'.length));
+            }
+
+            // Fechas: start:YYYY-MM-DD / finish:YYYY-MM-DD
+            const startLabel = labels.find(l => /^start:\d{4}-\d{2}-\d{2}$/i.test(l));
+            if (F_START && startLabel) { await updateDate(F_START, startLabel.split(':')[1]); }
+            const finishLabel = labels.find(l => /^finish:\d{4}-\d{2}-\d{2}$/i.test(l));
+            if (F_FINISH && finishLabel) { await updateDate(F_FINISH, finishLabel.split(':')[1]); }
+
+            // Métrica RICE y factores (opcional vía labels)
+            const reachLbl = labels.find(l => /^reach:\d+$/i.test(l));
+            if (F_REACH && reachLbl) await updateNumber(F_REACH, Number(reachLbl.split(':')[1]));
+            const impactLbl = labels.find(l => /^impact:\d+$/i.test(l));
+            if (F_IMPACT && impactLbl) await updateNumber(F_IMPACT, Number(impactLbl.split(':')[1]));
+            const confLbl = labels.find(l => /^confidence:\d+$/i.test(l));
+            if (F_CONF && confLbl) await updateNumber(F_CONF, Number(confLbl.split(':')[1]));
+            const effortLbl = labels.find(l => /^effort:\d+$/i.test(l));
+            if (F_EFFORT && effortLbl) await updateNumber(F_EFFORT, Number(effortLbl.split(':')[1]));
+            const riceLbl = labels.find(l => /^rice:\d+(\.\d+)?$/i.test(l));
+            if (F_RICE && riceLbl) await updateNumber(F_RICE, Number(riceLbl.split(':')[1]));
+
+            core.info('✓ Project fields updated from labels (sin unions).');
