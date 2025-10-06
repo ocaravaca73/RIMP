@@ -10,6 +10,7 @@ on:
 
 jobs:
   analyze:
+    if: ${{ hashFiles('**/*.cs') != '' }}   # solo corre si hay .cs
     runs-on: windows-latest
     permissions:
       security-events: write
@@ -17,6 +18,15 @@ jobs:
       contents: read
     steps:
       - uses: actions/checkout@v4
-      - uses: github/codeql-action/init@v3
-        with: { languages: csharp }
-      - uses: github/codeql-action/analyze@v3
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v3
+        with:
+          languages: csharp
+
+      - name: Autobuild
+        uses: github/codeql-action/autobuild@v3
+
+      - name: Perform CodeQL Analysis
+        uses: github/codeql-action/analyze@v3
+
