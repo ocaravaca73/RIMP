@@ -4,6 +4,11 @@
 
 This repository includes tools and documentation for managing issues in GitHub Projects.
 
+> **Planning Source of Truth:** Azure DevOps Boards – RIMP
+>
+> GitHub is used only for **code/PRs/CI**. All work (epics, stories, tasks, bugs, risks, sprints) lives in **ADO Boards**.
+
+
 ### Testing the Workflow
 
 The repository includes comprehensive testing tools for the label-to-project-field mapping workflow:
