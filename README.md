@@ -3,7 +3,7 @@
 
 
 # RIMP
-
+Real-time insights for motorsports platforms
 ## Project Management
 
 This repository includes tools and documentation for managing issues in GitHub Projects.
