@@ -11,7 +11,7 @@ on:
 
 jobs:
   analyze:
-    if: ${{ hashFiles('**/*.cs') != '' }}   # solo corre si hay .cs
+    if: ${{ hashFiles('**/*.cs') != '' }}   # solo corre si hay .cs de lo contrario nos da error
     runs-on: windows-latest
     permissions:
       security-events: write
