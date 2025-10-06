@@ -12,7 +12,7 @@ This repository includes tools and documentation for managing issues in GitHub P
 >
 > GitHub is only used for coding/PRs/CI. All the works ( epics/US/tasks**código/PRs/tasks/bugs/etc  lives in **ADO Boards**.
 
-
+Test. [MS0-GH] Hardening
 ### Testing the Workflow
 
 The repository includes comprehensive testing tools for the label-to-project-field mapping workflow:
