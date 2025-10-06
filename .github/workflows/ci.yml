@@ -1,22 +1,21 @@
 name: CI - Build & Tests
 
 on:
+  workflow_dispatch:
   push:
-    branches: [ develop ]
+    branches: [ main, develop ]          # <-- antes tenías develop
   pull_request:
-    branches: [ main, develop ]
+    branches: [ main, develop ]          # <-- simplificamos al trunk
+    # si quieres mantener develop también, añade: [ main, develop ]
 
 jobs:
   build-and-test:
     runs-on: windows-latest
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      # Only set up .NET if there is a solution in the repo
-      - name: Setup .NET
+      - uses: actions/setup-dotnet@v4
         if: ${{ hashFiles('**/*.sln') != '' }}
-        uses: actions/setup-dotnet@v4
         with:
           dotnet-version: '8.0.x'
 
@@ -32,7 +31,7 @@ jobs:
         if: ${{ hashFiles('**/*.sln') != '' }}
         run: dotnet test --configuration Release --no-build --logger "trx;LogFileName=test_results.trx"
 
-      # Always succeed when there is no solution yet (bootstrap stage)
-      - name: Bootstrap OK
+      - name: Bootstrap OK (no solution yet)
         if: ${{ hashFiles('**/*.sln') == '' }}
         run: echo "No .sln yet - bootstrap CI succeeded"
+
