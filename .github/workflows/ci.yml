@@ -2,10 +2,13 @@ name: CI - Build & Tests
 
 on:
   push:
-    branches: [ develop ]
+    branches:
+        - main
+        - develop
   pull_request:
-    branches: [ main, develop ]
-
+    branches: 
+        - main
+        - develop
 jobs:
   build-and-test:
     runs-on: windows-latest
