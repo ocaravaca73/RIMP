@@ -1,0 +1,93 @@
+<mxfile host="app.diagrams.net" agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36 Edg/141.0.0.0" version="28.2.5">
+  <diagram name="Arquitectura - IA First (Híbrida)" id="0">
+    <mxGraphModel dx="1418" dy="786" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1920" pageHeight="1080" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+        <mxCell id="a1" value="Product &lt;br&gt;Owner" style="text;html=1;strokeColor=none;fillColor=none;align=left;verticalAlign=top;fontSize=17;" parent="1" vertex="1">
+          <mxGeometry x="80" y="95" width="90" height="30" as="geometry" />
+        </mxCell>
+        <mxCell id="a2" value="Developer" style="text;html=1;strokeColor=none;fillColor=none;align=left;verticalAlign=top;fontSize=17;" parent="1" vertex="1">
+          <mxGeometry x="160" y="500" width="140" height="30" as="geometry" />
+        </mxCell>
+        <mxCell id="c_ado" value="Azure DevOps Boards (FUENTE DE VERDAD)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#1a73e8;fontStyle=1;fontSize=16;" parent="1" vertex="1">
+          <mxGeometry x="390" y="60" width="340" height="100" as="geometry" />
+        </mxCell>
+        <mxCell id="c_mcp" value="MCP Server (Orquestación/Conectores)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#ef6c00;fontStyle=1;fontSize=16;" parent="1" vertex="1">
+          <mxGeometry x="940" y="60" width="340" height="100" as="geometry" />
+        </mxCell>
+        <mxCell id="c_vs" value="Visual Studio 2022 + GitHub Copilot (Chat/Edits)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#6a1b9a;fontStyle=1;fontSize=16;" parent="1" vertex="1">
+          <mxGeometry x="120" y="280" width="360" height="110" as="geometry" />
+        </mxCell>
+        <mxCell id="c_gh" value="GitHub Repos (RIMP)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#24292e;fontStyle=1;fontSize=16;" parent="1" vertex="1">
+          <mxGeometry x="540" y="470" width="360" height="110" as="geometry" />
+        </mxCell>
+        <mxCell id="c_gha" value="GitHub Actions (CI/CD)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#1b5e20;fontStyle=1;fontSize=13;" parent="1" vertex="1">
+          <mxGeometry x="1010" y="250" width="300" height="110" as="geometry" />
+        </mxCell>
+        <mxCell id="e1" value="Crea / gestiona Work Items" style="endArrow=block;rounded=1;strokeColor=#1a73e8;fontSize=16;" parent="1" source="a1" target="c_ado" edge="1">
+          <mxGeometry x="-0.1933" y="16" relative="1" as="geometry">
+            <mxPoint as="offset" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="e2" value="Prompts a Copilot" style="endArrow=block;rounded=1;strokeColor=#6a1b9a;fontSize=16;" parent="1" source="a2" target="c_vs" edge="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e3" value="Branch / Commit / PR" style="endArrow=block;rounded=1;strokeColor=#4E342E;fontSize=16;" parent="1" source="c_vs" target="c_gh" edge="1">
+          <mxGeometry x="-0.4269" y="-30" relative="1" as="geometry">
+            <mxPoint as="offset" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="e4" value="CI: build/tests" style="endArrow=block;rounded=1;strokeColor=#1B5E20;exitX=0.997;exitY=0.382;exitDx=0;exitDy=0;exitPerimeter=0;fontSize=16;" parent="1" source="c_gh" target="c_gha" edge="1">
+          <mxGeometry x="-0.1145" relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="990" y="450" />
+            </Array>
+            <mxPoint as="offset" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="e5" value="Checks PR" style="endArrow=block;rounded=1;strokeColor=#1B5E20;fontSize=16;" parent="1" source="c_gha" target="c_gh" edge="1">
+          <mxGeometry x="-0.0972" relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="920" y="400" />
+            </Array>
+            <mxPoint as="offset" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="e6" value="PR/commits ↔ Work Items" style="endArrow=block;rounded=1;strokeColor=#1a73e8;fontSize=16;" parent="1" source="c_gh" target="c_ado" edge="1">
+          <mxGeometry x="0.1729" y="-24" relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="630" y="250" />
+              <mxPoint x="610" y="200" />
+            </Array>
+            <mxPoint as="offset" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="e7" value="Boards embebidos en VS" style="endArrow=block;rounded=1;strokeColor=#1a73e8;fontSize=16;" parent="1" source="c_ado" target="c_vs" edge="1">
+          <mxGeometry x="0.6011" y="-48" relative="1" as="geometry">
+            <mxPoint as="offset" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="e8" value="API Work Items / Queries" style="endArrow=block;rounded=1;strokeColor=#EF6C00;fontSize=16;" parent="1" source="c_ado" target="c_mcp" edge="1">
+          <mxGeometry x="-0.0476" y="-20" relative="1" as="geometry">
+            <mxPoint as="offset" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="e9" value="(opcional) disparar pipeline" style="endArrow=block;rounded=1;strokeColor=#EF6C00;dashed=1;fontSize=16;" parent="1" source="c_mcp" target="c_gha" edge="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e10" value="(opcional) PR/labels" style="endArrow=block;rounded=1;strokeColor=#EF6C00;dashed=1;fontSize=16;" parent="1" source="c_mcp" target="c_gh" edge="1">
+          <mxGeometry x="-0.2292" y="-28" relative="1" as="geometry">
+            <mxPoint as="offset" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="KuOoyRWJ2gB4thCd8UR--1" value="" style="shape=umlActor;verticalLabelPosition=bottom;verticalAlign=top;html=1;outlineConnect=0;" vertex="1" parent="1">
+          <mxGeometry x="90" y="25" width="30" height="60" as="geometry" />
+        </mxCell>
+        <mxCell id="KuOoyRWJ2gB4thCd8UR--3" value="" style="shape=umlActor;verticalLabelPosition=bottom;verticalAlign=top;html=1;outlineConnect=0;" vertex="1" parent="1">
+          <mxGeometry x="110" y="485" width="30" height="60" as="geometry" />
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>
