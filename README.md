@@ -3,6 +3,8 @@
 
 
 # RIMP
+Real-time Insights 
+for Motorsport Platforms
 
 ## Project Management
 
