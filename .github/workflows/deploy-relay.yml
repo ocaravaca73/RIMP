@@ -1,0 +1,25 @@
+name: Deploy Orchestrator Relay (Azure Functions)
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - orchestrator-relay/**
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    env:
+      AZURE_FUNCTIONAPP_NAME: rimp-orch-relay   # si tu App se llama distinto, cámbialo
+      AZURE_FUNCTIONAPP_PACKAGE_PATH: orchestrator-relay
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with: { dotnet-version: '8.0.x' }
+      - run: dotnet restore $AZURE_FUNCTIONAPP_PACKAGE_PATH
+      - run: dotnet publish $AZURE_FUNCTIONAPP_PACKAGE_PATH -c Release -o published
+      - uses: azure/functions-action@v1
+        with:
+          app-name: ${{ env.AZURE_FUNCTIONAPP_NAME }}
+          package: published
+          publish-profile: ${{ secrets.AZUREAPPSVC_PUBLISH_PROFILE }}
