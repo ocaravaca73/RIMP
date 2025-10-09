@@ -10,16 +10,27 @@ jobs:
   build-and-deploy:
     runs-on: ubuntu-latest
     env:
-      AZURE_FUNCTIONAPP_NAME: rimp-orch-relay   # si tu App se llama distinto, cámbialo
-      AZURE_FUNCTIONAPP_PACKAGE_PATH: orchestrator-relay
+      APP_NAME: rimp-orch-relay                 # si tu Function App tiene otro nombre, cámbialo
+      PROJECT_PATH: orchestrator-relay
+      PUBLISH_DIR: publish
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-dotnet@v4
-        with: { dotnet-version: '8.0.x' }
-      - run: dotnet restore $AZURE_FUNCTIONAPP_PACKAGE_PATH
-      - run: dotnet publish $AZURE_FUNCTIONAPP_PACKAGE_PATH -c Release -o published
-      - uses: azure/functions-action@v1
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
         with:
-          app-name: ${{ env.AZURE_FUNCTIONAPP_NAME }}
-          package: published
+          dotnet-version: '8.0.x'
+
+      - name: Restore
+        run: dotnet restore $PROJECT_PATH
+
+      - name: Publish
+        run: dotnet publish $PROJECT_PATH -c Release -o $PUBLISH_DIR
+
+      - name: Deploy to Azure Functions
+        uses: azure/webapps-deploy@v3
+        with:
+          app-name: ${{ env.APP_NAME }}
           publish-profile: ${{ secrets.AZUREAPPSVC_PUBLISH_PROFILE }}
+          package: ${{ env.PUBLISH_DIR }}
+
