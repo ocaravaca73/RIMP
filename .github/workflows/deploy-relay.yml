@@ -13,14 +13,24 @@ jobs:
       PROJECT_PATH: orchestrator-relay
       PUBLISH_DIR: publish
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-dotnet@v4
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
         with:
           dotnet-version: '8.0.x'
-      - run: dotnet restore $PROJECT_PATH
-      - run: dotnet publish $PROJECT_PATH -c Release -o $PUBLISH_DIR
+
+      - name: Restore
+        run: dotnet restore $PROJECT_PATH
+
+      - name: Publish
+        run: dotnet publish $PROJECT_PATH -c Release -o $PUBLISH_DIR
+
+      # Deploy oficial para Azure Functions con Publish Profile
       - name: Deploy to Azure Functions
-        uses: azure/webapps-deploy@v3
+        uses: azure/functions-action@v1
         with:
           publish-profile: ${{ secrets.AZUREAPPSVC_PUBLISH_PROFILE }}
+          app-name: rimp-orch-relay           # EXACTO como en Azure
           package: ${{ env.PUBLISH_DIR }}
