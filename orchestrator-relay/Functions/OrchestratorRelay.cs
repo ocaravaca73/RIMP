@@ -1,10 +1,13 @@
 using System.Net;
+using System.Net.Http;                 // <-- Added in version 2
 using System.Net.Http.Headers;
 using System.Text;
 using System.Text.Json;
+using System.Threading.Tasks;          // <-- Added in versión 2
 using Microsoft.Azure.Functions.Worker;
 using Microsoft.Azure.Functions.Worker.Http;
 using Microsoft.Extensions.Logging;
+
 
 namespace Rimp.Orchestrator.Relay;
 
