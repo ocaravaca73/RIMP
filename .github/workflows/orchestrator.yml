@@ -1,8 +1,9 @@
 # RIMP Orchestrator (RFC01)
-# ORCH_VERSION: 1.4.1  (2025-10-10)
+# ORCH_VERSION: 1.4.2  (2025-10-10)
 # Changelog
-#  - 1.4.1: Fix gate outputs -> use multiline output for err_list to support multiple ORCH_ERR:* tags.
-#  - 1.4.0: Add version banner; PO:ACTION ensure/remove in Azure Boards; robust tags merge; strict gate; PR comment in English.
+#  - 1.4.2: Concurrency -> cancel-in-progress: true (ensures latest WI update wins; avoids stale runs re-adding PO:ACTION).
+#  - 1.4.1: Fix multiline output for err_list (supports multiple ORCH_ERR:*).
+#  - 1.4.0: Version banner; PO:ACTION ensure/remove (Azure Boards); robust tags merge; strict gate; PR comment in English.
 
 name: RIMP Orchestrator
 
@@ -14,12 +15,13 @@ permissions:
   contents: write
   pull-requests: write
 
+# Run only the latest orchestration per WI (avoid stale runs)
 concurrency:
   group: orchestration-${{ github.event.client_payload.workItemId || github.event.client_payload.wi }}
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 env:
-  ORCH_VERSION: "1.4.1"
+  ORCH_VERSION: "1.4.2"
 
   # RFC01 state machine
   ORCH_STATES: "ANALYSIS,IN_PROGRESS,READY_FOR_TEST,CHANGES_REQUESTED,READY_TO_MERGE,DONE"
@@ -66,7 +68,6 @@ jobs:
             const set = new Set(all.split(sep).map(s => s.trim()).filter(Boolean));
             if (one) set.add(one.trim());
             for (const e of errs) if (e) set.add(String(e).trim());
-
             const TAGS_ALL = Array.from(set).join(sep);
 
             core.setOutput('WI', wi);
@@ -91,7 +92,6 @@ jobs:
           STATE_CANDIDATES="$(echo "$TAGS" | grep -i '^ORCH:' | grep -vi '^ORCH_ERR:' || true)"
 
           write_err_list() {
-            # Always use multiline output to support multiple errors
             {
               echo 'err_list<<ERRS'
               echo "$ERR_LIST"
@@ -152,7 +152,6 @@ jobs:
             echo "proceed=false" >> "$GITHUB_OUTPUT"
             echo "reason=STATE_OK_BUT_NO_EXEC ($RAW_STATE)" >> "$GITHUB_OUTPUT"
             echo "state=$RAW_STATE" >> "$GITHUB_OUTPUT"
-            # empty error list
             ERR_LIST=""
             write_err_list
             echo "needsPO=false" >> "$GITHUB_OUTPUT"
@@ -310,7 +309,6 @@ jobs:
             const repo  = context.repo.repo;
             const wi    = process.env.WI;
 
-            // Prefer PR from feature/AB<WI>-auto; fallback to title "AB#<WI>"
             const head = `${owner}:feature/AB${wi}-auto`;
             let prs = await github.rest.pulls.list({ owner, repo, state: 'open', head });
             let pr  = prs.data[0];
@@ -366,5 +364,5 @@ jobs:
               headers: { 'Authorization': auth, 'Content-Type': 'application/json-patch+json' },
               body: JSON.stringify(patch)
             });
-            if (!r2.ok) core.warning(`PATCH (add PO:ACTION) failed: ${r2.status}`);
+            if (!r2.ok) core.warning(`PATCH (add PO:ACTION) failed: ${r2.status}");
             else core.info('PO:ACTION tag ensured.')
