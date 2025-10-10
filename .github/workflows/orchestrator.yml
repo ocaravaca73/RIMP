@@ -1,6 +1,7 @@
 name: RIMP Orchestrator
 
 on:
+  # Must match the relay event (DISPATCH_EVENT = rimp.orch)
   repository_dispatch:
     types: [rimp.orch]
 
@@ -8,17 +9,24 @@ permissions:
   contents: write
   pull-requests: write
 
+# Avoid duplicate runs for the same Work Item (WI)
 concurrency:
   group: orchestration-${{ github.event.client_payload.workItemId || github.event.client_payload.wi }}
   cancel-in-progress: false
 
 env:
+  # RFC01 state machine
   ORCH_STATES: "ANALYSIS,IN_PROGRESS,READY_FOR_TEST,CHANGES_REQUESTED,READY_TO_MERGE,DONE"
   ORCH_EXEC_STATE: "IN_PROGRESS"
 
+  # Azure Boards API (configure as repo/org secrets)
+  AZDO_ORG_URL: ${{ secrets.AZDO_ORG_URL }}
+  AZDO_PROJECT: ${{ secrets.AZDO_PROJECT }}
+  AZDO_PAT: ${{ secrets.AZDO_PAT }}
+
 jobs:
   gate:
-    name: Gate (validación RFC01)
+    name: Gate (RFC01 validation)
     runs-on: ubuntu-latest
     outputs:
       proceed:   ${{ steps.decide.outputs.proceed }}
@@ -28,53 +36,37 @@ jobs:
       state:     ${{ steps.decide.outputs.state }}
       tags_all:  ${{ steps.capture.outputs.TAGS_ALL }}
       err_list:  ${{ steps.decide.outputs.err_list }}
+      needsPO:   ${{ steps.decide.outputs.needsPO }}
     steps:
-      - name: Capturar payload (unificar tagsAll + orchTag + errors[])
+      - name: Capture payload (unify tagsAll + orchTag + errors[])
         id: capture
-        shell: bash
-        run: |
-          set -e
-          echo "WI=${{ github.event.client_payload.workItemId || github.event.client_payload.wi }}" >> $GITHUB_OUTPUT
-          echo "TITLE<<EOF" >> $GITHUB_OUTPUT
-          echo "${{ github.event.client_payload.title || github.event.client_payload.workItemTitle || '' }}" >> $GITHUB_OUTPUT
-          echo "EOF" >> $GITHUB_OUTPUT
+        uses: actions/github-script@v7
+        with:
+          script: |
+            // Read client payload
+            const p = context.payload.client_payload || {};
+            const wi    = String(p.workItemId || p.wi || '');
+            const title = String(p.title || p.workItemTitle || '');
+            const all   = String(p.tagsAll || p.tags || '');
+            const one   = String(p.orchTag || '');
+            const errs  = Array.isArray(p.errors) ? p.errors.filter(Boolean) : [];
 
-          # Entradas posibles
-          ALL="${{ github.event.client_payload.tagsAll || github.event.client_payload.tags || '' }}"
-          ONE="${{ github.event.client_payload.orchTag || '' }}"
-          ERR_ARR='${{ toJson(github.event.client_payload.errors) }}'
+            // Build TAGS_ALL: start with "all", ensure "one" is included once, add errors[] if missing
+            const sep = ';';
+            const set = new Set(
+              all.split(sep).map(s => s.trim()).filter(Boolean)
+            );
+            if (one) set.add(one.trim());
+            for (const e of errs) if (e) set.add(String(e).trim());
 
-          # Normaliza ALL
-          TAGS_ALL="$ALL"
+            const TAGS_ALL = Array.from(set).join(sep);
 
-          # A) añade orchTag si no está en ALL
-          if [ -n "$ONE" ]; then
-            # comparamos insensible a mayúsculas
-            echo "$TAGS_ALL" | grep -i -q -F "$ONE" || TAGS_ALL="${TAGS_ALL:+$TAGS_ALL;}$ONE"
-          fi
+            core.setOutput('WI', wi);
+            core.setOutput('TITLE', title);
+            core.setOutput('TAGS_ALL', TAGS_ALL);
+            core.info(`Captured WI=${wi} | TAGS_ALL=${TAGS_ALL}`);
 
-          # B) añade errors[] si faltan
-          if [ "$ERR_ARR" != "null" ] && [ -n "$ERR_ARR" ]; then
-            # ERR_ARR es JSON; lo pasamos a líneas
-            ERR_JOINED=$(echo "$ERR_ARR" | jq -r '.[]?' 2>/dev/null | tr '\n' ';' | sed 's/;*$//')
-            if [ -n "$ERR_JOINED" ]; then
-              # inserta solo los que no estén ya
-              IFS=';' read -r -a ERRLIST <<< "$ERR_JOINED"
-              for e in "${ERRLIST[@]}"; do
-                [ -z "$e" ] && continue
-                echo "$TAGS_ALL" | grep -i -q -F "$e" || TAGS_ALL="${TAGS_ALL:+$TAGS_ALL;}$e"
-              done
-            fi
-          fi
-
-          echo "TAGS_ALL=$TAGS_ALL" >> $GITHUB_OUTPUT
-
-          echo "Payload capturado:"
-          echo "  WI=$WI"
-          echo "  TITLE=$(echo "${{ github.event.client_payload.title || github.event.client_payload.workItemTitle || '' }}" | head -c 120)"
-          echo "  TAGS_ALL=$TAGS_ALL"
-
-      - name: Decidir según RFC01
+      - name: Decide according to RFC01
         id: decide
         shell: bash
         run: |
@@ -87,7 +79,6 @@ jobs:
           norm_list() { echo "$1" | tr ',;|' '\n' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | sed '/^$/d'; }
 
           TAGS=$(norm_list "$TAGS_ALL")
-          # Separa ORCH_ERR:* (errores) y ORCH:<STATE> (estado)
           ERR_LIST=$(echo "$TAGS" | grep -i '^ORCH_ERR:' || true)
           STATE_CANDIDATES=$(echo "$TAGS" | grep -i '^ORCH:' | grep -vi '^ORCH_ERR:' || true)
 
@@ -96,6 +87,7 @@ jobs:
             echo "reason=Missing WI" >> $GITHUB_OUTPUT
             echo "state=" >> $GITHUB_OUTPUT
             echo "err_list=$ERR_LIST" >> $GITHUB_OUTPUT
+            echo "needsPO=true" >> $GITHUB_OUTPUT
             exit 0
           fi
 
@@ -104,16 +96,18 @@ jobs:
           STATE_COUNT=$(echo "$STATE_CANDIDATES" | sed '/^$/d' | wc -l | tr -d ' ')
           if [ "$STATE_COUNT" -eq 0 ]; then
             echo "proceed=false" >> $GITHUB_OUTPUT
-            echo "reason=NO_STATE_TAG (falta ORCH:<STATE>)" >> $GITHUB_OUTPUT
+            echo "reason=NO_STATE_TAG (missing ORCH:<STATE>)" >> $GITHUB_OUTPUT
             echo "state=" >> $GITHUB_OUTPUT
             echo "err_list=$ERR_LIST" >> $GITHUB_OUTPUT
+            echo "needsPO=true" >> $GITHUB_OUTPUT
             exit 0
           fi
           if [ "$STATE_COUNT" -gt 1 ]; then
             echo "proceed=false" >> $GITHUB_OUTPUT
-            echo "reason=MULTI_STATE_TAG (más de un ORCH:<STATE>)" >> $GITHUB_OUTPUT
+            echo "reason=MULTI_STATE_TAG (more than one ORCH:<STATE>)" >> $GITHUB_OUTPUT
             echo "state=" >> $GITHUB_OUTPUT
             echo "err_list=$ERR_LIST" >> $GITHUB_OUTPUT
+            echo "needsPO=true" >> $GITHUB_OUTPUT
             exit 0
           fi
 
@@ -123,6 +117,7 @@ jobs:
             echo "reason=STATE_NOT_ALLOWED ($RAW_STATE)" >> $GITHUB_OUTPUT
             echo "state=$RAW_STATE" >> $GITHUB_OUTPUT
             echo "err_list=$ERR_LIST" >> $GITHUB_OUTPUT
+            echo "needsPO=true" >> $GITHUB_OUTPUT
             exit 0
           fi
 
@@ -131,6 +126,7 @@ jobs:
             echo "reason=ERROR_TAGS_PRESENT" >> $GITHUB_OUTPUT
             echo "state=$RAW_STATE" >> $GITHUB_OUTPUT
             echo "err_list=$ERR_LIST" >> $GITHUB_OUTPUT
+            echo "needsPO=true" >> $GITHUB_OUTPUT
             exit 0
           fi
 
@@ -139,6 +135,7 @@ jobs:
             echo "reason=STATE_OK_BUT_NO_EXEC ($RAW_STATE)" >> $GITHUB_OUTPUT
             echo "state=$RAW_STATE" >> $GITHUB_OUTPUT
             echo "err_list=" >> $GITHUB_OUTPUT
+            echo "needsPO=false" >> $GITHUB_OUTPUT
             exit 0
           fi
 
@@ -146,8 +143,9 @@ jobs:
           echo "reason=OK" >> $GITHUB_OUTPUT
           echo "state=$RAW_STATE" >> $GITHUB_OUTPUT
           echo "err_list=" >> $GITHUB_OUTPUT
+          echo "needsPO=false" >> $GITHUB_OUTPUT
 
-      - name: Log del gate
+      - name: Gate summary
         shell: bash
         run: |
           echo "Gate: ${{ steps.decide.outputs.reason }}"
@@ -155,9 +153,10 @@ jobs:
           echo "  STATE=${{ steps.decide.outputs.state }}"
           echo "  ERR_LIST=${{ steps.decide.outputs.err_list }}"
           echo "  TAGS_ALL=${{ steps.capture.outputs.TAGS_ALL }}"
+          echo "  needsPO=${{ steps.decide.outputs.needsPO }}"
 
   orchestrate:
-    name: Orquestar (IN_PROGRESS)
+    name: Orchestrate (IN_PROGRESS)
     needs: gate
     if: needs.gate.outputs.proceed == 'true'
     runs-on: ubuntu-latest
@@ -166,13 +165,13 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Variables de trabajo
+      - name: Working variables
         shell: bash
         run: |
           echo "WI=${{ needs.gate.outputs.wi }}" >> $GITHUB_ENV
           echo "TITLE=${{ needs.gate.outputs.title || 'RIMP Task' }}" >> $GITHUB_ENV
 
-      - name: Determinar rama base
+      - name: Determine base branch
         id: base
         shell: bash
         run: |
@@ -183,7 +182,7 @@ jobs:
             echo "base=${{ github.event.repository.default_branch }}" >> $GITHUB_OUTPUT
           fi
 
-      - name: Crear o reutilizar rama
+      - name: Create or reuse branch
         id: br
         env:
           WI:   ${{ env.WI }}
@@ -196,7 +195,7 @@ jobs:
 
           if git ls-remote --heads origin "$BR" | grep -q "$BR"; then
             echo "exists=true" >> $GITHUB_OUTPUT
-            echo "Rama existente: $BR"
+            echo "Existing branch: $BR"
             git switch "$BR"
             git merge --ff-only "origin/$BASE" || true
           else
@@ -209,10 +208,10 @@ jobs:
             git add .rimp/.keep
             git commit -m "chore: init branch for AB${WI}"
             git push -u origin "$BR"
-            echo "Creada rama $BR desde $BASE."
+            echo "Created $BR from $BASE."
           fi
 
-      - name: Crear o reutilizar PR (draft)
+      - name: Create or reuse PR (draft)
         uses: actions/github-script@v7
         env:
           WI:     ${{ env.WI }}
@@ -226,26 +225,57 @@ jobs:
             const head  = `${owner}:${process.env.BRANCH}`;
             const base  = process.env.BASE;
             const wi    = process.env.WI;
-            const title = `AB#${wi}: ${process.env.TITLE || '(sin título)'}`.slice(0, 240);
+            const title = `AB#${wi}: ${process.env.TITLE || '(no title)'}`.slice(0, 240);
 
             const prs = await github.rest.pulls.list({ owner, repo, state: 'open', head });
             if (prs.data.length > 0) {
-              core.info(`PR ya existe: #${prs.data[0].number}`);
+              core.info(`PR already exists: #${prs.data[0].number}`);
             } else {
               const pr = await github.rest.pulls.create({
                 owner, repo, head: process.env.BRANCH, base, title, draft: true,
-                body: `Auto-creado para AB#${wi} (estado ORCH:IN_PROGRESS).`
+                body: `Auto-created for AB#${wi} (state ORCH:IN_PROGRESS).`
               });
-              core.info(`PR creado: #${pr.data.number}`);
+              core.info(`PR created: #${pr.data.number}`);
             }
 
-  report:
-    name: Reporte (cuando gate bloquea)
+      - name: Remove PO:ACTION tag in Azure Boards (if present)
+        if: ${{ env.AZDO_ORG_URL != '' && env.AZDO_PROJECT != '' && env.AZDO_PAT != '' }}
+        uses: actions/github-script@v7
+        env:
+          WI: ${{ env.WI }}
+        with:
+          script: |
+            // Remove "PO:ACTION" from System.Tags (idempotent)
+            const org  = process.env.AZDO_ORG_URL.replace(/\/$/, '');
+            const proj = process.env.AZDO_PROJECT;
+            const wi   = process.env.WI;
+            const pat  = process.env.AZDO_PAT;
+
+            const auth = 'Basic ' + Buffer.from(':'+pat).toString('base64');
+            const getUrl = `${org}/${proj}/_apis/wit/workitems/${wi}?fields=System.Tags&api-version=7.0`;
+            const r1 = await fetch(getUrl, { headers: { Authorization: auth }});
+            if (!r1.ok) { core.warning(`GET WI failed: ${r1.status}`); return; }
+            const js = await r1.json();
+            const cur = String(js.fields?.['System.Tags'] || '');
+            const list = cur.split(';').map(t => t.trim()).filter(Boolean).filter(t => t !== 'PO:ACTION');
+            const value = list.join(';');
+
+            const patchUrl = `${org}/${proj}/_apis/wit/workitems/${wi}?api-version=7.0`;
+            const patch = [{ op: 'add', path: '/fields/System.Tags', value }];
+            const r2 = await fetch(patchUrl, {
+              method: 'PATCH',
+              headers: { 'Authorization': auth, 'Content-Type': 'application/json-patch+json' },
+              body: JSON.stringify(patch)
+            });
+            if (!r2.ok) core.warning(`PATCH (remove PO:ACTION) failed: ${r2.status}`);
+
+  report_when_blocked:
+    name: Report (when gate blocks)
     needs: gate
     if: needs.gate.outputs.proceed != 'true'
     runs-on: ubuntu-latest
     steps:
-      - name: Publicar comentario en PR (si existe)
+      - name: Comment on PR (if any)
         uses: actions/github-script@v7
         env:
           WI:       ${{ needs.gate.outputs.wi }}
@@ -257,22 +287,56 @@ jobs:
             const owner = context.repo.owner;
             const repo  = context.repo.repo;
             const wi    = process.env.WI;
-            const head  = `${owner}:feature/AB${wi}-auto`;
 
-            const prs = await github.rest.pulls.list({ owner, repo, state: 'open', head });
-            if (prs.data.length === 0) {
-              core.info(`No hay PR abierto para AB#${wi}; nada que comentar.`);
-              return;
+            // Prefer PR from feature/AB<WI>-auto; fallback to title "AB#<WI>"
+            const head = `${owner}:feature/AB${wi}-auto`;
+            let prs = await github.rest.pulls.list({ owner, repo, state: 'open', head });
+            let pr  = prs.data[0];
+            if (!pr) {
+              prs = await github.rest.pulls.list({ owner, repo, state: 'open' });
+              pr = prs.data.find(p => p.title.includes(`AB#${wi}`));
             }
-            const pr = prs.data[0];
+            if (!pr) { core.info(`No open PR for AB#${wi}; nothing to comment.`); return; }
 
             const reason = process.env.REASON || 'Gate blocked';
-            const state  = process.env.STATE || '(sin estado)';
+            const state  = process.env.STATE || '(no state)';
             const errs   = (process.env.ERR_LIST || '').split('\n').filter(Boolean);
 
-            let body = `⚠️ Orquestación detenida por el *gate*.\n\n- **WI**: AB#${wi}\n- **Estado ORCH**: ${state}\n- **Motivo**: ${reason}\n`;
-            if (errs.length) {
-              body += `- **Errores**:\n` + errs.map(e => `  - ${e}`).join('\n') + '\n';
-            }
+            let body = `⚠️ Orchestration blocked by the gate.\n\n- **WI**: AB#${wi}\n- **ORCH state**: ${state}\n- **Reason**: ${reason}\n`;
+            if (errs.length) body += `- **Errors**:\n` + errs.map(e => `  - ${e}`).join('\n') + '\n';
+
             await github.rest.issues.createComment({ owner, repo, issue_number: pr.number, body });
-            core.info(`Comentario publicado en PR #${pr.number}: ${reason}`);
+            core.info(`Comment posted on PR #${pr.number}: ${reason}`);
+
+      - name: Ensure PO:ACTION tag in Azure Boards (radar for PO)
+        if: ${{ needs.gate.outputs.needsPO == 'true' && env.AZDO_ORG_URL != '' && env.AZDO_PROJECT != '' && env.AZDO_PAT != '' }}
+        uses: actions/github-script@v7
+        env:
+          WI: ${{ needs.gate.outputs.wi }}
+        with:
+          script: |
+            // Add "PO:ACTION" to System.Tags (idempotent)
+            const org  = process.env.AZDO_ORG_URL.replace(/\/$/, '');
+            const proj = process.env.AZDO_PROJECT;
+            const wi   = process.env.WI;
+            const pat  = process.env.AZDO_PAT;
+
+            const auth = 'Basic ' + Buffer.from(':'+pat).toString('base64');
+            const getUrl = `${org}/${proj}/_apis/wit/workitems/${wi}?fields=System.Tags&api-version=7.0`;
+            const r1 = await fetch(getUrl, { headers: { Authorization: auth }});
+            if (!r1.ok) { core.warning(`GET WI failed: ${r1.status}`); return; }
+            const js = await r1.json();
+            const cur = String(js.fields?.['System.Tags'] || '');
+            const list = cur.split(';').map(t => t.trim()).filter(Boolean);
+            if (!list.includes('PO:ACTION')) list.push('PO:ACTION');
+            const value = list.join(';');
+
+            const patchUrl = `${org}/${proj}/_apis/wit/workitems/${wi}?api-version=7.0`;
+            const patch = [{ op: 'add', path: '/fields/System.Tags', value }];
+            const r2 = await fetch(patchUrl, {
+              method: 'PATCH',
+              headers: { 'Authorization': auth, 'Content-Type': 'application/json-patch+json' },
+              body: JSON.stringify(patch)
+            });
+            if (!r2.ok) core.warning(`PATCH (add PO:ACTION) failed: ${r2.status}`);
+            else core.info('PO:ACTION tag ensured.')
