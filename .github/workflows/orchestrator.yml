@@ -1,16 +1,12 @@
 # RIMP Orchestrator (RFC01)
-# ORCH_VERSION: 1.4.0  (2025-10-10)
-# Changelog (since 1.3.x):
-#  - Fix: Completed github-script in "Comment on PR" (SyntaxError: Unexpected end of input).
-#  - Add: Version banner and run log.
-#  - Add: PO:ACTION integration (ensure/remove) via Azure Boards API.
-#  - Improve: Robust tags merge (tagsAll + orchTag + errors[]), strict gate.
-#  - Keep: Idempotent branch/PR creation and PR fallback by title AB#<WI>.
+# ORCH_VERSION: 1.4.1  (2025-10-10)
+# Changelog
+#  - 1.4.1: Fix gate outputs -> use multiline output for err_list to support multiple ORCH_ERR:* tags.
+#  - 1.4.0: Add version banner; PO:ACTION ensure/remove in Azure Boards; robust tags merge; strict gate; PR comment in English.
 
 name: RIMP Orchestrator
 
 on:
-  # Must match the relay event (DISPATCH_EVENT = rimp.orch)
   repository_dispatch:
     types: [rimp.orch]
 
@@ -18,14 +14,12 @@ permissions:
   contents: write
   pull-requests: write
 
-# Avoid duplicate runs for the same Work Item (WI)
 concurrency:
   group: orchestration-${{ github.event.client_payload.workItemId || github.event.client_payload.wi }}
   cancel-in-progress: false
 
 env:
-  # Version banner
-  ORCH_VERSION: "1.4.0"
+  ORCH_VERSION: "1.4.1"
 
   # RFC01 state machine
   ORCH_STATES: "ANALYSIS,IN_PROGRESS,READY_FOR_TEST,CHANGES_REQUESTED,READY_TO_MERGE,DONE"
@@ -52,8 +46,7 @@ jobs:
     steps:
       - name: Version banner
         shell: bash
-        run: |
-          echo "🔖 RIMP Orchestrator v${{ env.ORCH_VERSION }} (RFC01)"
+        run: echo "🔖 RIMP Orchestrator v${{ env.ORCH_VERSION }} (RFC01)"
 
       - name: Capture payload (unify tagsAll + orchTag + errors[])
         id: capture
@@ -68,7 +61,7 @@ jobs:
             const one   = String(p.orchTag || '');
             const errs  = Array.isArray(p.errors) ? p.errors.filter(Boolean) : [];
 
-            // Build TAGS_ALL: start with "all", ensure "one" is included once, add errors[] if missing
+            // Build TAGS_ALL
             const sep = ';';
             const set = new Set(all.split(sep).map(s => s.trim()).filter(Boolean));
             if (one) set.add(one.trim());
@@ -94,15 +87,24 @@ jobs:
           norm_list() { echo "$1" | tr ',;|' '\n' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | sed '/^$/d'; }
 
           TAGS=$(norm_list "$TAGS_ALL")
-          ERR_LIST=$(echo "$TAGS" | grep -i '^ORCH_ERR:' || true)
-          STATE_CANDIDATES=$(echo "$TAGS" | grep -i '^ORCH:' | grep -vi '^ORCH_ERR:' || true)
+          ERR_LIST="$(echo "$TAGS" | grep -i '^ORCH_ERR:' || true)"
+          STATE_CANDIDATES="$(echo "$TAGS" | grep -i '^ORCH:' | grep -vi '^ORCH_ERR:' || true)"
+
+          write_err_list() {
+            # Always use multiline output to support multiple errors
+            {
+              echo 'err_list<<ERRS'
+              echo "$ERR_LIST"
+              echo 'ERRS'
+            } >> "$GITHUB_OUTPUT"
+          }
 
           if [ -z "$WI" ]; then
-            echo "proceed=false" >> $GITHUB_OUTPUT
-            echo "reason=Missing WI" >> $GITHUB_OUTPUT
-            echo "state=" >> $GITHUB_OUTPUT
-            echo "err_list=$ERR_LIST" >> $GITHUB_OUTPUT
-            echo "needsPO=true" >> $GITHUB_OUTPUT
+            echo "proceed=false" >> "$GITHUB_OUTPUT"
+            echo "reason=Missing WI" >> "$GITHUB_OUTPUT"
+            echo "state=" >> "$GITHUB_OUTPUT"
+            write_err_list
+            echo "needsPO=true" >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
@@ -110,55 +112,59 @@ jobs:
 
           STATE_COUNT=$(echo "$STATE_CANDIDATES" | sed '/^$/d' | wc -l | tr -d ' ')
           if [ "$STATE_COUNT" -eq 0 ]; then
-            echo "proceed=false" >> $GITHUB_OUTPUT
-            echo "reason=NO_STATE_TAG (missing ORCH:<STATE>)" >> $GITHUB_OUTPUT
-            echo "state=" >> $GITHUB_OUTPUT
-            echo "err_list=$ERR_LIST" >> $GITHUB_OUTPUT
-            echo "needsPO=true" >> $GITHUB_OUTPUT
+            echo "proceed=false" >> "$GITHUB_OUTPUT"
+            echo "reason=NO_STATE_TAG (missing ORCH:<STATE>)" >> "$GITHUB_OUTPUT"
+            echo "state=" >> "$GITHUB_OUTPUT"
+            write_err_list
+            echo "needsPO=true" >> "$GITHUB_OUTPUT"
             exit 0
           fi
+
           if [ "$STATE_COUNT" -gt 1 ]; then
-            echo "proceed=false" >> $GITHUB_OUTPUT
-            echo "reason=MULTI_STATE_TAG (more than one ORCH:<STATE>)" >> $GITHUB_OUTPUT
-            echo "state=" >> $GITHUB_OUTPUT
-            echo "err_list=$ERR_LIST" >> $GITHUB_OUTPUT
-            echo "needsPO=true" >> $GITHUB_OUTPUT
+            echo "proceed=false" >> "$GITHUB_OUTPUT"
+            echo "reason=MULTI_STATE_TAG (more than one ORCH:<STATE>)" >> "$GITHUB_OUTPUT"
+            echo "state=" >> "$GITHUB_OUTPUT"
+            write_err_list
+            echo "needsPO=true" >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
           RAW_STATE=$(echo "$STATE_CANDIDATES" | head -n1 | sed 's/^ORCH:\s*//I' | tr '[:lower:]' '[:upper:]')
           if ! echo "$RAW_STATE" | grep -Eq "$ALLOWED_REGEX"; then
-            echo "proceed=false" >> $GITHUB_OUTPUT
-            echo "reason=STATE_NOT_ALLOWED ($RAW_STATE)" >> $GITHUB_OUTPUT
-            echo "state=$RAW_STATE" >> $GITHUB_OUTPUT
-            echo "err_list=$ERR_LIST" >> $GITHUB_OUTPUT
-            echo "needsPO=true" >> $GITHUB_OUTPUT
+            echo "proceed=false" >> "$GITHUB_OUTPUT"
+            echo "reason=STATE_NOT_ALLOWED ($RAW_STATE)" >> "$GITHUB_OUTPUT"
+            echo "state=$RAW_STATE" >> "$GITHUB_OUTPUT"
+            write_err_list
+            echo "needsPO=true" >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
           if [ -n "$ERR_LIST" ]; then
-            echo "proceed=false" >> $GITHUB_OUTPUT
-            echo "reason=ERROR_TAGS_PRESENT" >> $GITHUB_OUTPUT
-            echo "state=$RAW_STATE" >> $GITHUB_OUTPUT
-            echo "err_list=$ERR_LIST" >> $GITHUB_OUTPUT
-            echo "needsPO=true" >> $GITHUB_OUTPUT
+            echo "proceed=false" >> "$GITHUB_OUTPUT"
+            echo "reason=ERROR_TAGS_PRESENT" >> "$GITHUB_OUTPUT"
+            echo "state=$RAW_STATE" >> "$GITHUB_OUTPUT"
+            write_err_list
+            echo "needsPO=true" >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
           if [ "$RAW_STATE" != "$EXEC_STATE" ]; then
-            echo "proceed=false" >> $GITHUB_OUTPUT
-            echo "reason=STATE_OK_BUT_NO_EXEC ($RAW_STATE)" >> $GITHUB_OUTPUT
-            echo "state=$RAW_STATE" >> $GITHUB_OUTPUT
-            echo "err_list=" >> $GITHUB_OUTPUT
-            echo "needsPO=false" >> $GITHUB_OUTPUT
+            echo "proceed=false" >> "$GITHUB_OUTPUT"
+            echo "reason=STATE_OK_BUT_NO_EXEC ($RAW_STATE)" >> "$GITHUB_OUTPUT"
+            echo "state=$RAW_STATE" >> "$GITHUB_OUTPUT"
+            # empty error list
+            ERR_LIST=""
+            write_err_list
+            echo "needsPO=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
-          echo "proceed=true" >> $GITHUB_OUTPUT
-          echo "reason=OK" >> $GITHUB_OUTPUT
-          echo "state=$RAW_STATE" >> $GITHUB_OUTPUT
-          echo "err_list=" >> $GITHUB_OUTPUT
-          echo "needsPO=false" >> $GITHUB_OUTPUT
+          echo "proceed=true" >> "$GITHUB_OUTPUT"
+          echo "reason=OK" >> "$GITHUB_OUTPUT"
+          echo "state=$RAW_STATE" >> "$GITHUB_OUTPUT"
+          ERR_LIST=""
+          write_err_list
+          echo "needsPO=false" >> "$GITHUB_OUTPUT"
 
       - name: Gate summary
         shell: bash
@@ -167,7 +173,7 @@ jobs:
           echo "  Version: ${{ env.ORCH_VERSION }}"
           echo "  WI=${{ steps.capture.outputs.WI }}"
           echo "  STATE=${{ steps.decide.outputs.state }}"
-          echo "  ERR_LIST=${{ steps.decide.outputs.err_list }}"
+          echo "  ERR_LIST<<EOF"; echo "${{ steps.decide.outputs.err_list }}"; echo "EOF"
           echo "  TAGS_ALL=${{ steps.capture.outputs.TAGS_ALL }}"
           echo "  needsPO=${{ steps.decide.outputs.needsPO }}"
 
@@ -325,9 +331,7 @@ jobs:
               `- **ORCH state**: ${state}`,
               `- **Reason**: ${reason}`
             ].join('\n');
-            if (errs.length) {
-              body += '\n- **Errors**:\n' + errs.map(e => `  - ${e}`).join('\n') + '\n';
-            }
+            if (errs.length) body += '\n- **Errors**:\n' + errs.map(e => `  - ${e}`).join('\n') + '\n';
 
             await github.rest.issues.createComment({ owner, repo, issue_number: pr.number, body });
             core.info(`Comment posted on PR #${pr.number}: ${reason}`);
