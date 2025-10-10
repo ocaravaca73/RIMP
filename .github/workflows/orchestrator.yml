@@ -1,18 +1,103 @@
 name: RIMP Orchestrator
+
 on:
+  # Debe coincidir con el evento que envía el Worker (DISPATCH_EVENT = rimp.orch)
   repository_dispatch:
-    types: [rimp.orch.updated]
+    types: [rimp.orch]
 
 permissions:
   contents: write
   pull-requests: write
 
+# Evita carreras duplicadas por el mismo Work Item
+concurrency: orchestration-${{ github.event.client_payload.workItemId }}
+
 jobs:
-  log-payload:
+  orchestrate:
     runs-on: ubuntu-latest
+
     steps:
-      - name: Show payload
+      - name: Capturar payload
+        id: v
         run: |
-          echo "Event: ${{ github.event.action }}"
-          echo "WI: ${{ github.event.client_payload.workItemId }}"
-          echo '${{ toJson(github.event.client_payload) }}'
+          echo "wi=${{ github.event.client_payload.workItemId }}" >> $GITHUB_OUTPUT
+          echo "title<<EOF" >> $GITHUB_OUTPUT
+          echo "${{ github.event.client_payload.title }}" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+          echo "tags=${{ github.event.client_payload.orchTag }}" >> $GITHUB_OUTPUT
+
+      - name: Log de depuración
+        run: |
+          echo "WI: ${{ steps.v.outputs.wi }}"
+          echo "TITLE: ${{ steps.v.outputs.title }}"
+          echo "TAGS: ${{ steps.v.outputs.tags }}"
+
+      # Si por cualquier motivo llega sin ORCH, salimos sin error.
+      - name: Guard - requiere tag ORCH
+        if: ${{ !contains(steps.v.outputs.tags, 'ORCH:') }}
+        run: echo "Sin tag ORCH:. No hago nada." && exit 0
+
+      - name: Checkout repo (historial completo)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Determinar rama base
+        id: base
+        run: |
+          echo "base=${{ github.event.repository.default_branch }}" >> $GITHUB_OUTPUT
+
+      - name: Crear o reutilizar rama de trabajo
+        id: br
+        env:
+          WI: ${{ steps.v.outputs.wi }}
+          BASE: ${{ steps.base.outputs.base }}
+        run: |
+          set -e
+          BR="feature/AB${WI}-auto"
+          echo "branch=$BR" >> $GITHUB_OUTPUT
+
+          # ¿Existe la rama en remoto?
+          if git ls-remote --heads origin "$BR" | grep -q "$BR"; then
+            echo "exists=true" >> $GITHUB_OUTPUT
+            echo "La rama $BR ya existe."
+          else
+            echo "exists=false" >> $GITHUB_OUTPUT
+            git config user.name "rimp-bot"
+            git config user.email "rimp-bot@users.noreply.github.com"
+            git switch -c "$BR" "origin/$BASE"
+            mkdir -p .rimp
+            echo "# keep" > .rimp/.keep
+            git add .rimp/.keep
+            git commit -m "chore: init branch for AB${WI}"
+            git push origin "$BR"
+            echo "Creada rama $BR desde $BASE."
+          fi
+
+      - name: Crear PR (draft) si no existe
+        uses: actions/github-script@v7
+        env:
+          WI: ${{ steps.v.outputs.wi }}
+          BRANCH: ${{ steps.br.outputs.branch }}
+          BASE: ${{ steps.base.outputs.base }}
+          TITLE: ${{ steps.v.outputs.title }}
+        with:
+          script: |
+            const owner = context.repo.owner;
+            const repo  = context.repo.repo;
+            const head  = `${owner}:${process.env.BRANCH}`;
+            const base  = process.env.BASE;
+            const wi    = process.env.WI;
+            const title = `AB#${wi}: ${process.env.TITLE}`.slice(0, 240);
+
+            // ¿Ya hay PR abierto desde esa rama?
+            const prs = await github.rest.pulls.list({ owner, repo, state: 'open', head });
+            if (prs.data.length > 0) {
+              core.info(`PR ya existe: #${prs.data[0].number}`);
+            } else {
+              const pr = await github.rest.pulls.create({
+                owner, repo, head: process.env.BRANCH, base, title, draft: true,
+                body: `Auto-creado para AB#${wi}.`
+              });
+              core.info(`PR creado: #${pr.data.number}`);
+            }
