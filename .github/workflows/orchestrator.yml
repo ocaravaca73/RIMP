@@ -53,9 +53,7 @@ jobs:
 
             // Build TAGS_ALL: start with "all", ensure "one" is included once, add errors[] if missing
             const sep = ';';
-            const set = new Set(
-              all.split(sep).map(s => s.trim()).filter(Boolean)
-            );
+            const set = new Set(all.split(sep).map(s => s.trim()).filter(Boolean));
             if (one) set.add(one.trim());
             for (const e of errs) if (e) set.add(String(e).trim());
 
@@ -302,41 +300,4 @@ jobs:
             const state  = process.env.STATE || '(no state)';
             const errs   = (process.env.ERR_LIST || '').split('\n').filter(Boolean);
 
-            let body = `⚠️ Orchestration blocked by the gate.\n\n- **WI**: AB#${wi}\n- **ORCH state**: ${state}\n- **Reason**: ${reason}\n`;
-            if (errs.length) body += `- **Errors**:\n` + errs.map(e => `  - ${e}`).join('\n') + '\n';
-
-            await github.rest.issues.createComment({ owner, repo, issue_number: pr.number, body });
-            core.info(`Comment posted on PR #${pr.number}: ${reason}`);
-
-      - name: Ensure PO:ACTION tag in Azure Boards (radar for PO)
-        if: ${{ needs.gate.outputs.needsPO == 'true' && env.AZDO_ORG_URL != '' && env.AZDO_PROJECT != '' && env.AZDO_PAT != '' }}
-        uses: actions/github-script@v7
-        env:
-          WI: ${{ needs.gate.outputs.wi }}
-        with:
-          script: |
-            // Add "PO:ACTION" to System.Tags (idempotent)
-            const org  = process.env.AZDO_ORG_URL.replace(/\/$/, '');
-            const proj = process.env.AZDO_PROJECT;
-            const wi   = process.env.WI;
-            const pat  = process.env.AZDO_PAT;
-
-            const auth = 'Basic ' + Buffer.from(':'+pat).toString('base64');
-            const getUrl = `${org}/${proj}/_apis/wit/workitems/${wi}?fields=System.Tags&api-version=7.0`;
-            const r1 = await fetch(getUrl, { headers: { Authorization: auth }});
-            if (!r1.ok) { core.warning(`GET WI failed: ${r1.status}`); return; }
-            const js = await r1.json();
-            const cur = String(js.fields?.['System.Tags'] || '');
-            const list = cur.split(';').map(t => t.trim()).filter(Boolean);
-            if (!list.includes('PO:ACTION')) list.push('PO:ACTION');
-            const value = list.join(';');
-
-            const patchUrl = `${org}/${proj}/_apis/wit/workitems/${wi}?api-version=7.0`;
-            const patch = [{ op: 'add', path: '/fields/System.Tags', value }];
-            const r2 = await fetch(patchUrl, {
-              method: 'PATCH',
-              headers: { 'Authorization': auth, 'Content-Type': 'application/json-patch+json' },
-              body: JSON.stringify(patch)
-            });
-            if (!r2.ok) core.warning(`PATCH (add PO:ACTION) failed: ${r2.status}`);
-            else core.info('PO:ACTION tag ensured.')
+            let body = `⚠️ Orchest
