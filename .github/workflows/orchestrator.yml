@@ -1,7 +1,6 @@
 name: RIMP Orchestrator
 
 on:
-  # Debe coincidir con el evento que envía el Worker (DISPATCH_EVENT = rimp.orch)
   repository_dispatch:
     types: [rimp.orch]
 
@@ -9,15 +8,12 @@ permissions:
   contents: write
   pull-requests: write
 
-# Evita carreras duplicadas por el mismo Work Item (acepta wi o workItemId)
 concurrency:
   group: orchestration-${{ github.event.client_payload.workItemId || github.event.client_payload.wi }}
   cancel-in-progress: false
 
 env:
-  # Estados de RFC01 aceptados para ORCH:<STATE>
   ORCH_STATES: "ANALYSIS,IN_PROGRESS,READY_FOR_TEST,CHANGES_REQUESTED,READY_TO_MERGE,DONE"
-  # Estado que permite ejecutar la orquestación “fuerte” (crear/reutilizar rama/PR)
   ORCH_EXEC_STATE: "IN_PROGRESS"
 
 jobs:
@@ -33,41 +29,45 @@ jobs:
       tags_all:  ${{ steps.capture.outputs.TAGS_ALL }}
       err_list:  ${{ steps.decide.outputs.err_list }}
     steps:
-      - name: Capturar payload (compat)
+      - name: Capturar payload (unificar tagsAll + orchTag + errors[])
         id: capture
         shell: bash
         run: |
           set -e
-          # IDs y título
           echo "WI=${{ github.event.client_payload.workItemId || github.event.client_payload.wi }}" >> $GITHUB_OUTPUT
           echo "TITLE<<EOF" >> $GITHUB_OUTPUT
           echo "${{ github.event.client_payload.title || github.event.client_payload.workItemTitle || '' }}" >> $GITHUB_OUTPUT
           echo "EOF" >> $GITHUB_OUTPUT
 
-          # Tags: prioriza orchTag (uno), luego tags/tagsAll (cadena)
-          TAGS_ONE="${{ github.event.client_payload.orchTag || '' }}"
-          TAGS_STR="${{ github.event.client_payload.tags || github.event.client_payload.tagsAll || '' }}"
-          if [ -n "$TAGS_ONE" ]; then
-            TAGS_JOINED="$TAGS_ONE"
-          else
-            TAGS_JOINED="$TAGS_STR"
+          # Entradas posibles
+          ALL="${{ github.event.client_payload.tagsAll || github.event.client_payload.tags || '' }}"
+          ONE="${{ github.event.client_payload.orchTag || '' }}"
+          ERR_ARR='${{ toJson(github.event.client_payload.errors) }}'
+
+          # Normaliza ALL
+          TAGS_ALL="$ALL"
+
+          # A) añade orchTag si no está en ALL
+          if [ -n "$ONE" ]; then
+            # comparamos insensible a mayúsculas
+            echo "$TAGS_ALL" | grep -i -q -F "$ONE" || TAGS_ALL="${TAGS_ALL:+$TAGS_ALL;}$ONE"
           fi
 
-          # Errors[] como lista separada por ';' si viene
-          ERR_JOINED="${{ github.event.client_payload.errors && join(github.event.client_payload.errors, ';') || '' }}"
-
-          # Ensambla TAGS_ALL = tags + errores
-          if [ -n "$ERR_JOINED" ]; then
-            if [ -n "$TAGS_JOINED" ]; then
-              TAGS_ALL="$TAGS_JOINED;$ERR_JOINED"
-            else
-              TAGS_ALL="$ERR_JOINED"
+          # B) añade errors[] si faltan
+          if [ "$ERR_ARR" != "null" ] && [ -n "$ERR_ARR" ]; then
+            # ERR_ARR es JSON; lo pasamos a líneas
+            ERR_JOINED=$(echo "$ERR_ARR" | jq -r '.[]?' 2>/dev/null | tr '\n' ';' | sed 's/;*$//')
+            if [ -n "$ERR_JOINED" ]; then
+              # inserta solo los que no estén ya
+              IFS=';' read -r -a ERRLIST <<< "$ERR_JOINED"
+              for e in "${ERRLIST[@]}"; do
+                [ -z "$e" ] && continue
+                echo "$TAGS_ALL" | grep -i -q -F "$e" || TAGS_ALL="${TAGS_ALL:+$TAGS_ALL;}$e"
+              done
             fi
-          else
-            TAGS_ALL="$TAGS_JOINED"
           fi
 
-          echo "TAGS_ALL=${TAGS_ALL}" >> $GITHUB_OUTPUT
+          echo "TAGS_ALL=$TAGS_ALL" >> $GITHUB_OUTPUT
 
           echo "Payload capturado:"
           echo "  WI=$WI"
@@ -91,7 +91,6 @@ jobs:
           ERR_LIST=$(echo "$TAGS" | grep -i '^ORCH_ERR:' || true)
           STATE_CANDIDATES=$(echo "$TAGS" | grep -i '^ORCH:' | grep -vi '^ORCH_ERR:' || true)
 
-          # Validaciones
           if [ -z "$WI" ]; then
             echo "proceed=false" >> $GITHUB_OUTPUT
             echo "reason=Missing WI" >> $GITHUB_OUTPUT
@@ -100,10 +99,8 @@ jobs:
             exit 0
           fi
 
-          # Normaliza estados permitidos
           ALLOWED_REGEX="^($(echo "$ALLOWED" | tr ',' '|' | sed 's/[[:space:]]//g'))$"
 
-          # Extrae el único estado si existe
           STATE_COUNT=$(echo "$STATE_CANDIDATES" | sed '/^$/d' | wc -l | tr -d ' ')
           if [ "$STATE_COUNT" -eq 0 ]; then
             echo "proceed=false" >> $GITHUB_OUTPUT
@@ -120,7 +117,6 @@ jobs:
             exit 0
           fi
 
-          # Estado único normalizado (mayúsculas, sin 'ORCH:')
           RAW_STATE=$(echo "$STATE_CANDIDATES" | head -n1 | sed 's/^ORCH:\s*//I' | tr '[:lower:]' '[:upper:]')
           if ! echo "$RAW_STATE" | grep -Eq "$ALLOWED_REGEX"; then
             echo "proceed=false" >> $GITHUB_OUTPUT
@@ -130,7 +126,6 @@ jobs:
             exit 0
           fi
 
-          # Si hay errores, no avanzamos (se reportará)
           if [ -n "$ERR_LIST" ]; then
             echo "proceed=false" >> $GITHUB_OUTPUT
             echo "reason=ERROR_TAGS_PRESENT" >> $GITHUB_OUTPUT
@@ -139,7 +134,6 @@ jobs:
             exit 0
           fi
 
-          # Avanza solo si el estado es el ejecutable (IN_PROGRESS)
           if [ "$RAW_STATE" != "$EXEC_STATE" ]; then
             echo "proceed=false" >> $GITHUB_OUTPUT
             echo "reason=STATE_OK_BUT_NO_EXEC ($RAW_STATE)" >> $GITHUB_OUTPUT
@@ -183,7 +177,6 @@ jobs:
         shell: bash
         run: |
           git fetch --all --prune
-          # Usa develop si existe, si no, el default del repo
           if git rev-parse --verify origin/develop >/dev/null 2>&1; then
             echo "base=develop" >> $GITHUB_OUTPUT
           else
@@ -201,7 +194,6 @@ jobs:
           BR="feature/AB${WI}-auto"
           echo "branch=$BR" >> $GITHUB_OUTPUT
 
-          # ¿Existe en remoto?
           if git ls-remote --heads origin "$BR" | grep -q "$BR"; then
             echo "exists=true" >> $GITHUB_OUTPUT
             echo "Rama existente: $BR"
@@ -236,7 +228,6 @@ jobs:
             const wi    = process.env.WI;
             const title = `AB#${wi}: ${process.env.TITLE || '(sin título)'}`.slice(0, 240);
 
-            // ¿Existe PR abierto desde esa rama?
             const prs = await github.rest.pulls.list({ owner, repo, state: 'open', head });
             if (prs.data.length > 0) {
               core.info(`PR ya existe: #${prs.data[0].number}`);
@@ -268,7 +259,6 @@ jobs:
             const wi    = process.env.WI;
             const head  = `${owner}:feature/AB${wi}-auto`;
 
-            // Busca PR abierto para esa rama
             const prs = await github.rest.pulls.list({ owner, repo, state: 'open', head });
             if (prs.data.length === 0) {
               core.info(`No hay PR abierto para AB#${wi}; nada que comentar.`);
