@@ -1,3 +1,12 @@
+# RIMP Orchestrator (RFC01)
+# ORCH_VERSION: 1.4.0  (2025-10-10)
+# Changelog (since 1.3.x):
+#  - Fix: Completed github-script in "Comment on PR" (SyntaxError: Unexpected end of input).
+#  - Add: Version banner and run log.
+#  - Add: PO:ACTION integration (ensure/remove) via Azure Boards API.
+#  - Improve: Robust tags merge (tagsAll + orchTag + errors[]), strict gate.
+#  - Keep: Idempotent branch/PR creation and PR fallback by title AB#<WI>.
+
 name: RIMP Orchestrator
 
 on:
@@ -15,6 +24,9 @@ concurrency:
   cancel-in-progress: false
 
 env:
+  # Version banner
+  ORCH_VERSION: "1.4.0"
+
   # RFC01 state machine
   ORCH_STATES: "ANALYSIS,IN_PROGRESS,READY_FOR_TEST,CHANGES_REQUESTED,READY_TO_MERGE,DONE"
   ORCH_EXEC_STATE: "IN_PROGRESS"
@@ -38,6 +50,11 @@ jobs:
       err_list:  ${{ steps.decide.outputs.err_list }}
       needsPO:   ${{ steps.decide.outputs.needsPO }}
     steps:
+      - name: Version banner
+        shell: bash
+        run: |
+          echo "🔖 RIMP Orchestrator v${{ env.ORCH_VERSION }} (RFC01)"
+
       - name: Capture payload (unify tagsAll + orchTag + errors[])
         id: capture
         uses: actions/github-script@v7
@@ -147,6 +164,7 @@ jobs:
         shell: bash
         run: |
           echo "Gate: ${{ steps.decide.outputs.reason }}"
+          echo "  Version: ${{ env.ORCH_VERSION }}"
           echo "  WI=${{ steps.capture.outputs.WI }}"
           echo "  STATE=${{ steps.decide.outputs.state }}"
           echo "  ERR_LIST=${{ steps.decide.outputs.err_list }}"
@@ -300,4 +318,49 @@ jobs:
             const state  = process.env.STATE || '(no state)';
             const errs   = (process.env.ERR_LIST || '').split('\n').filter(Boolean);
 
-            let body = `⚠️ Orchest
+            let body = [
+              '⚠️ Orchestration blocked by the gate.',
+              '',
+              `- **WI**: AB#${wi}`,
+              `- **ORCH state**: ${state}`,
+              `- **Reason**: ${reason}`
+            ].join('\n');
+            if (errs.length) {
+              body += '\n- **Errors**:\n' + errs.map(e => `  - ${e}`).join('\n') + '\n';
+            }
+
+            await github.rest.issues.createComment({ owner, repo, issue_number: pr.number, body });
+            core.info(`Comment posted on PR #${pr.number}: ${reason}`);
+
+      - name: Ensure PO:ACTION tag in Azure Boards (PO radar)
+        if: ${{ needs.gate.outputs.needsPO == 'true' && env.AZDO_ORG_URL != '' && env.AZDO_PROJECT != '' && env.AZDO_PAT != '' }}
+        uses: actions/github-script@v7
+        env:
+          WI: ${{ needs.gate.outputs.wi }}
+        with:
+          script: |
+            // Add "PO:ACTION" to System.Tags (idempotent)
+            const org  = process.env.AZDO_ORG_URL.replace(/\/$/, '');
+            const proj = process.env.AZDO_PROJECT;
+            const wi   = process.env.WI;
+            const pat  = process.env.AZDO_PAT;
+
+            const auth = 'Basic ' + Buffer.from(':'+pat).toString('base64');
+            const getUrl = `${org}/${proj}/_apis/wit/workitems/${wi}?fields=System.Tags&api-version=7.0`;
+            const r1 = await fetch(getUrl, { headers: { Authorization: auth }});
+            if (!r1.ok) { core.warning(`GET WI failed: ${r1.status}`); return; }
+            const js = await r1.json();
+            const cur = String(js.fields?.['System.Tags'] || '');
+            const list = cur.split(';').map(t => t.trim()).filter(Boolean);
+            if (!list.includes('PO:ACTION')) list.push('PO:ACTION');
+            const value = list.join(';');
+
+            const patchUrl = `${org}/${proj}/_apis/wit/workitems/${wi}?api-version=7.0`;
+            const patch = [{ op: 'add', path: '/fields/System.Tags', value }];
+            const r2 = await fetch(patchUrl, {
+              method: 'PATCH',
+              headers: { 'Authorization': auth, 'Content-Type': 'application/json-patch+json' },
+              body: JSON.stringify(patch)
+            });
+            if (!r2.ok) core.warning(`PATCH (add PO:ACTION) failed: ${r2.status}`);
+            else core.info('PO:ACTION tag ensured.')
