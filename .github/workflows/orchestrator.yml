@@ -1,9 +1,9 @@
 # RIMP Orchestrator (RFC01)
-# ORCH_VERSION: 1.4.2  (2025-10-10)
+# ORCH_VERSION: 1.5.2  (2025-10-13)
 # Changelog
-#  - 1.4.2: Concurrency -> cancel-in-progress: true (ensures latest WI update wins; avoids stale runs re-adding PO:ACTION).
-#  - 1.4.1: Fix multiline output for err_list (supports multiple ORCH_ERR:*).
-#  - 1.4.0: Version banner; PO:ACTION ensure/remove (Azure Boards); robust tags merge; strict gate; PR comment in English.
+#  - 1.5.2: TaskSpec-only flow + Injector/CommitPush/tests + emisión de ORCH_ERR:* (TAG_MISSING, MULTI_TAG, WI_MISSING,
+#           STATE_INVALID, json, CI_CONFLICT, CI_FAIL, CHECKS). Mantiene lógica previa y compatibilidad 1.4.2.
+#  - 1.4.2: Concurrency -> cancel-in-progress: true, multilines in err_list, PO:ACTION handling. (base)  [kept]
 
 name: RIMP Orchestrator
 
@@ -21,13 +21,13 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  ORCH_VERSION: "1.4.2"
+  ORCH_VERSION: "1.5.2"
 
   # RFC01 state machine
   ORCH_STATES: "ANALYSIS,IN_PROGRESS,READY_FOR_TEST,CHANGES_REQUESTED,READY_TO_MERGE,DONE"
   ORCH_EXEC_STATE: "IN_PROGRESS"
 
-  # Azure Boards API (configure as repo/org secrets)
+  # Azure Boards API (optional but recommended)
   AZDO_ORG_URL: ${{ secrets.AZDO_ORG_URL }}
   AZDO_PROJECT: ${{ secrets.AZDO_PROJECT }}
   AZDO_PAT: ${{ secrets.AZDO_PAT }}
@@ -259,6 +259,200 @@ jobs:
               core.info(`PR created: #${pr.data.number}`);
             }
 
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Ensure tools exist
+        shell: bash
+        run: |
+          test -f ".github/tools/Injector/Injector.csproj" || { echo "Missing Injector tool"; exit 2; }
+          test -f ".github/tools/CommitPush/CommitPush.csproj" || { echo "Missing CommitPush tool"; exit 2; }
+
+      # --- TaskSpec-only: require plan/taskspec.json in feature/AB<WI>-auto ---
+      - name: Check TaskSpec presence & validity
+        id: taskspec
+        shell: bash
+        run: |
+          set -e
+          if ! command -v jq >/dev/null 2>&1; then sudo apt-get update && sudo apt-get install -y jq >/dev/null; fi
+          if [ ! -f "plan/taskspec.json" ]; then
+            echo "present=false" >> $GITHUB_OUTPUT
+            echo "reason=MISSING" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+          if ! jq -e 'type=="object" and ((.files//[]) + (.tests//[])) | length > 0' plan/taskspec.json >/dev/null 2>&1; then
+            echo "present=false" >> $GITHUB_OUTPUT
+            echo "reason=INVALID" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+          echo "present=true" >> $GITHUB_OUTPUT
+          echo "reason=OK" >> $GITHUB_OUTPUT
+          jq . plan/taskspec.json | head -n 50
+
+      - name: Report missing/invalid TaskSpec (PR comment)
+        if: steps.taskspec.outputs.present != 'true'
+        uses: actions/github-script@v8
+        env:
+          WI:     ${{ env.WI }}
+          REASON: ${{ steps.taskspec.outputs.reason }}
+        with:
+          script: |
+            const owner=context.repo.owner, repo=context.repo.repo, wi=process.env.WI, reason=process.env.REASON||'MISSING';
+            const head=`${owner}:feature/AB${wi}-auto`;
+            const prs=await github.rest.pulls.list({ owner, repo, state:'open', head });
+            const pr=prs.data[0]; if(!pr) { core.info('No PR to comment'); } else {
+              const body = `❌ TaskSpec ${reason}. Please add **plan/taskspec.json** to branch \`feature/AB${wi}-auto\`.\n`+
+                           `Expected: JSON with arrays **files/tests** (>=1 total).`;
+              await github.rest.issues.createComment({ owner, repo, issue_number: pr.number, body });
+            }
+
+      - name: Add tag ORCH_ERR:json in Azure Boards (optional)
+        if: steps.taskspec.outputs.present != 'true' && env.AZDO_ORG_URL != '' && env.AZDO_PROJECT != '' && env.AZDO_PAT != ''
+        uses: actions/github-script@v8
+        env:
+          WI: ${{ env.WI }}
+        with:
+          script: |
+            const org  = process.env.AZDO_ORG_URL.replace(/\/$/, '');
+            const proj = process.env.AZDO_PROJECT;
+            const wi   = process.env.WI;
+            const pat  = process.env.AZDO_PAT;
+            const auth = 'Basic ' + Buffer.from(':'+pat).toString('base64');
+
+            const getUrl = `${org}/${proj}/_apis/wit/workitems/${wi}?fields=System.Tags&api-version=7.0`;
+            const r1 = await fetch(getUrl, { headers:{Authorization:auth}});
+            if (!r1.ok) { core.warning(`GET WI failed: ${r1.status}`); return; }
+            const js = await r1.json();
+            const cur = String(js.fields?.['System.Tags'] || '');
+            const list = cur.split(';').map(t=>t.trim()).filter(Boolean);
+            if (!list.includes('ORCH_ERR:json')) list.push('ORCH_ERR:json');
+            const value = list.join(';');
+            const patchUrl = `${org}/${proj}/_apis/wit/workitems/${wi}?api-version=7.0`;
+            const patch = [{ op:'add', path:'/fields/System.Tags', value }];
+            const r2 = await fetch(patchUrl, { method:'PATCH', headers:{Authorization:auth,'Content-Type':'application/json-patch+json'}, body: JSON.stringify(patch) });
+            if (!r2.ok) core.warning(`PATCH (add ORCH_ERR:json) failed: ${r2.status}`);
+
+      - name: Stop (no TaskSpec)
+        if: steps.taskspec.outputs.present != 'true'
+        run: |
+          echo "Stopping run because TaskSpec is missing/invalid."
+          exit 1
+
+      # Early detection of merge conflicts on PR head → ORCH_ERR:CI_CONFLICT
+      - name: Detect merge conflicts (tag ORCH_ERR:CI_CONFLICT)
+        uses: actions/github-script@v8
+        env:
+          WI:     ${{ env.WI }}
+          BRANCH: ${{ steps.br.outputs.branch }}
+        with:
+          script: |
+            const owner=context.repo.owner, repo=context.repo.repo, wi=process.env.WI, head=process.env.BRANCH;
+            let prs=await github.rest.pulls.list({ owner, repo, state:'open', head: `${owner}:${head}` });
+            const pr=prs.data[0]; if(!pr){ core.info('No PR found'); return; }
+
+            // mergeable can be null initially; poll a bit
+            let mergeable = pr.mergeable;
+            for (let i=0;i<5 && mergeable === null;i++){
+              await new Promise(r=>setTimeout(r,1500));
+              const pr2 = await github.rest.pulls.get({ owner, repo, pull_number: pr.number });
+              mergeable = pr2.data.mergeable;
+            }
+            if (mergeable === false) {
+              core.warning('Merge conflicts detected.');
+              if (process.env.AZDO_ORG_URL && process.env.AZDO_PROJECT && process.env.AZDO_PAT) {
+                const org  = process.env.AZDO_ORG_URL.replace(/\/$/, '');
+                const proj = process.env.AZDO_PROJECT;
+                const pat  = process.env.AZDO_PAT;
+                const auth = 'Basic ' + Buffer.from(':'+pat).toString('base64');
+                const getUrl = `${org}/${proj}/_apis/wit/workitems/${wi}?fields=System.Tags&api-version=7.0`;
+                const r1 = await fetch(getUrl, { headers:{Authorization:auth}});
+                if (r1.ok) {
+                  const js = await r1.json();
+                  const cur = String(js.fields?.['System.Tags'] || '');
+                  const list = cur.split(';').map(t=>t.trim()).filter(Boolean);
+                  if (!list.includes('ORCH_ERR:CI_CONFLICT')) list.push('ORCH_ERR:CI_CONFLICT');
+                  const value = list.join(';');
+                  const patchUrl = `${org}/${proj}/_apis/wit/workitems/${wi}?api-version=7.0`;
+                  await fetch(patchUrl, { method:'PATCH', headers:{Authorization:auth,'Content-Type':'application/json-patch+json'}, body: JSON.stringify([{op:'add',path:'/fields/System.Tags',value}]) });
+                }
+              }
+              core.setFailed('Merge conflicts detected');
+            }
+
+      - name: Inject (generate code + tests from TaskSpec)
+        run: dotnet run --project .github/tools/Injector/Injector.csproj -- --taskspec plan/taskspec.json --dry-run false
+
+      - name: Commit & Push (Octokit)
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: dotnet run --project .github/tools/CommitPush/CommitPush.csproj -- --branch "${{ steps.br.outputs.branch }}" --message "AB#${{ env.WI }} · auto-inject" --manifest plan/manifest.txt
+
+      - name: Restore/Build/Test
+        run: |
+          dotnet restore
+          dotnet build -c Release
+          dotnet test -c Release --logger trx --results-directory test-results
+
+      - name: Publish test artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results
+          path: test-results
+
+      - name: Tag ORCH_ERR:CI_FAIL on build/test failure
+        if: failure()
+        uses: actions/github-script@v8
+        env:
+          WI: ${{ env.WI }}
+        with:
+          script: |
+            if (!(process.env.AZDO_ORG_URL && process.env.AZDO_PROJECT && process.env.AZDO_PAT)) { core.info('No ADO creds'); return; }
+            const org  = process.env.AZDO_ORG_URL.replace(/\/$/, '');
+            const proj = process.env.AZDO_PROJECT;
+            const wi   = process.env.WI;
+            const pat  = process.env.AZDO_PAT;
+            const auth = 'Basic ' + Buffer.from(':'+pat).toString('base64');
+
+            const getUrl = `${org}/${proj}/_apis/wit/workitems/${wi}?fields=System.Tags&api-version=7.0`;
+            const r1 = await fetch(getUrl, { headers:{Authorization:auth}});
+            if (!r1.ok) { core.warning(`GET WI failed: ${r1.status}`); return; }
+            const js = await r1.json();
+            const cur = String(js.fields?.['System.Tags'] || '');
+            const list = cur.split(';').map(t=>t.trim()).filter(Boolean);
+            if (!list.includes('ORCH_ERR:CI_FAIL')) list.push('ORCH_ERR:CI_FAIL');
+            const value = list.join(';');
+
+            const patchUrl = `${org}/${proj}/_apis/wit/workitems/${wi}?api-version=7.0`;
+            const patch = [{ op:'add', path:'/fields/System.Tags', value }];
+            const r2 = await fetch(patchUrl, { method:'PATCH', headers:{Authorization:auth,'Content-Type':'application/json-patch+json'}, body: JSON.stringify(patch) });
+            if (!r2.ok) core.warning(`PATCH (add ORCH_ERR:CI_FAIL) failed: ${r2.status}`);
+
+      - name: If green → set ORCH:READY_FOR_TEST in Azure Boards
+        if: ${{ success() && env.AZDO_ORG_URL != '' && env.AZDO_PROJECT != '' && env.AZDO_PAT != '' }}
+        uses: actions/github-script@v8
+        env:
+          WI: ${{ env.WI }}
+        with:
+          script: |
+            const org  = process.env.AZDO_ORG_URL.replace(/\/$/, '');
+            const proj = process.env.AZDO_PROJECT;
+            const wi   = process.env.WI;
+            const pat  = process.env.AZDO_PAT;
+            const auth = 'Basic ' + Buffer.from(':'+pat).toString('base64');
+            const getUrl = `${org}/${proj}/_apis/wit/workitems/${wi}?fields=System.Tags&api-version=7.0`;
+            const r1 = await fetch(getUrl, { headers: { Authorization: auth } });
+            if (!r1.ok) { core.warning(`GET WI failed: ${r1.status}`); return; }
+            const js = await r1.json();
+            const cur = String(js.fields?.['System.Tags'] || '');
+            const list = cur.split(';').map(t=>t.trim()).filter(Boolean).filter(t=>!/^ORCH:/i.test(t));
+            list.push('ORCH:READY_FOR_TEST');
+            const value = list.join(';');
+            const patchUrl = `${org}/${proj}/_apis/wit/workitems/${wi}?api-version=7.0`;
+            const patch = [{ op:'add', path:'/fields/System.Tags', value }];
+            await fetch(patchUrl, { method:'PATCH', headers:{ Authorization:auth, 'Content-Type':'application/json-patch+json' }, body: JSON.stringify(patch) });
+
       - name: Remove PO:ACTION tag in Azure Boards (if present)
         if: ${{ env.AZDO_ORG_URL != '' && env.AZDO_PROJECT != '' && env.AZDO_PAT != '' }}
         uses: actions/github-script@v8
@@ -334,6 +528,41 @@ jobs:
             await github.rest.issues.createComment({ owner, repo, issue_number: pr.number, body });
             core.info(`Comment posted on PR #${pr.number}: ${reason}`);
 
+      # Emit ORCH_ERR:* in ADO based on gate reason
+      - name: Tag ORCH_ERR from gate reason (WI_MISSING, TAG_MISSING, MULTI_TAG, STATE_INVALID)
+        if: env.AZDO_ORG_URL != '' && env.AZDO_PROJECT != '' && env.AZDO_PAT != ''
+        uses: actions/github-script@v8
+        env:
+          WI:     ${{ needs.gate.outputs.wi }}
+          REASON: ${{ needs.gate.outputs.reason }}
+        with:
+          script: |
+            const reason = (process.env.REASON || '').toUpperCase();
+            let errTag = null;
+            if (reason.startsWith('MISSING WI')) errTag = 'ORCH_ERR:WI_MISSING';
+            if (reason.startsWith('NO_STATE_TAG')) errTag = 'ORCH_ERR:TAG_MISSING';
+            if (reason.startsWith('MULTI_STATE_TAG')) errTag = 'ORCH_ERR:MULTI_TAG';
+            if (reason.startsWith('STATE_NOT_ALLOWED')) errTag = 'ORCH_ERR:STATE_INVALID';
+            if (!errTag) { core.info(`No ORCH_ERR mapping for reason=${reason}`); return; }
+
+            const org  = process.env.AZDO_ORG_URL.replace(/\/$/, '');
+            const proj = process.env.AZDO_PROJECT;
+            const wi   = process.env.WI;
+            const pat  = process.env.AZDO_PAT;
+            const auth = 'Basic ' + Buffer.from(':'+pat).toString('base64');
+
+            const getUrl = `${org}/${proj}/_apis/wit/workitems/${wi}?fields=System.Tags&api-version=7.0`;
+            const r1 = await fetch(getUrl, { headers:{Authorization:auth}});
+            if (!r1.ok) { core.warning(`GET WI failed: ${r1.status}`); return; }
+            const js = await r1.json();
+            const cur = String(js.fields?.['System.Tags'] || '');
+            const list = cur.split(';').map(t=>t.trim()).filter(Boolean);
+            if (!list.includes(errTag)) list.push(errTag);
+            const value = list.join(';');
+
+            const patchUrl = `${org}/${proj}/_apis/wit/workitems/${wi}?api-version=7.0`;
+            await fetch(patchUrl, { method:'PATCH', headers:{Authorization:auth,'Content-Type':'application/json-patch+json'}, body: JSON.stringify([{op:'add',path:'/fields/System.Tags',value}]) });
+
       - name: Ensure PO:ACTION tag in Azure Boards (PO radar)
         if: ${{ needs.gate.outputs.needsPO == 'true' && env.AZDO_ORG_URL != '' && env.AZDO_PROJECT != '' && env.AZDO_PAT != '' }}
         uses: actions/github-script@v8
@@ -364,5 +593,4 @@ jobs:
               headers: { 'Authorization': auth, 'Content-Type': 'application/json-patch+json' },
               body: JSON.stringify(patch)
             });
-            if (!r2.ok) core.warning(`PATCH (add PO:ACTION) failed: ${r2.status}");
-            else core.info('PO:ACTION tag ensured.')
+            if (!r2.ok) core.warning(`PATCH (add PO:ACTION) failed: ${r2.status}"); else core.info('PO:ACTION tag ensured.')
