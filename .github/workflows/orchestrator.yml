@@ -52,7 +52,7 @@ jobs:
 
       - name: Capture payload (unify tagsAll + orchTag + errors[])
         id: capture
-        uses: actions/github-script@v7
+        uses: actions/github-script@v8
         with:
           script: |
             // Read client payload
@@ -233,7 +233,7 @@ jobs:
           fi
 
       - name: Create or reuse PR (draft)
-        uses: actions/github-script@v7
+        uses: actions/github-script@v8
         env:
           WI:     ${{ env.WI }}
           BRANCH: ${{ steps.br.outputs.branch }}
@@ -261,7 +261,7 @@ jobs:
 
       - name: Remove PO:ACTION tag in Azure Boards (if present)
         if: ${{ env.AZDO_ORG_URL != '' && env.AZDO_PROJECT != '' && env.AZDO_PAT != '' }}
-        uses: actions/github-script@v7
+        uses: actions/github-script@v8
         env:
           WI: ${{ env.WI }}
         with:
@@ -297,7 +297,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Comment on PR (if any)
-        uses: actions/github-script@v7
+        uses: actions/github-script@v8
         env:
           WI:       ${{ needs.gate.outputs.wi }}
           REASON:   ${{ needs.gate.outputs.reason }}
@@ -336,7 +336,7 @@ jobs:
 
       - name: Ensure PO:ACTION tag in Azure Boards (PO radar)
         if: ${{ needs.gate.outputs.needsPO == 'true' && env.AZDO_ORG_URL != '' && env.AZDO_PROJECT != '' && env.AZDO_PAT != '' }}
-        uses: actions/github-script@v7
+        uses: actions/github-script@v8
         env:
           WI: ${{ needs.gate.outputs.wi }}
         with:
