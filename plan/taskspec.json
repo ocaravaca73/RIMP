@@ -1,0 +1,19 @@
+{
+  "workItemId": "9",
+  "featureBranch": "feature/AB9-auto",
+  "projectsToEnsure": [
+    "src/RIMP.Analytics/RIMP.Analytics.csproj",
+    "tests/RIMP.Analytics.Tests/RIMP.Analytics.Tests.csproj"
+  ],
+  "files": [
+    { "path": "src/RIMP.Analytics/LapTimeAnalyzer.cs", "template": "LapTimeAnalyzer" }
+  ],
+  "tests": [
+    {
+      "path": "tests/RIMP.Analytics.Tests/LapTimeAnalyzerTests.cs",
+      "template": "LapTimeAnalyzerTests",
+      "data": { "SampleA": "60.123", "SampleB": "59.456" }
+    }
+  ],
+  "commitMessage": "AB#9 · auto-inject"
+}
