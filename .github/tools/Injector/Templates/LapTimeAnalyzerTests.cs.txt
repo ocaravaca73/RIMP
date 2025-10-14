@@ -1,0 +1,27 @@
+// RIMP.Analytics.Tests - LapTimeAnalyzer tests (generated)
+
+using System.Collections.Generic;
+using Xunit;
+using RIMP.Analytics;
+
+namespace RIMP.Analytics.Tests
+{
+    public class LapTimeAnalyzerTests
+    {
+        [Fact]
+        public void Analyze_Computes_Stats_From_Two_Samples()
+        {
+            double a = {{SampleA}};
+            double b = {{SampleB}};
+            var sut = new LapTimeAnalyzer();
+
+            var stats = sut.Analyze(new List<double> { a, b });
+
+            Assert.Equal(2, stats.Count);
+            Assert.InRange(stats.Best, System.Math.Min(a, b) - 1e-9, System.Math.Min(a, b) + 1e-9);
+            Assert.InRange(stats.Worst, System.Math.Max(a, b) - 1e-9, System.Math.Max(a, b) + 1e-9);
+            var expectedAvg = (a + b) / 2.0;
+            Assert.InRange(stats.Average, expectedAvg - 1e-9, expectedAvg + 1e-9);
+        }
+    }
+}
