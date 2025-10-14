@@ -1,0 +1,36 @@
+// RIMP.Analytics - LapTimeAnalyzer (generated)
+// Intent: compute basic statistics from lap times (seconds).
+
+using System;
+using System.Collections.Generic;
+using System.Linq;
+
+namespace RIMP.Analytics
+{
+    public sealed class LapStats
+    {
+        public int Count { get; init; }
+        public double Best { get; init; }
+        public double Worst { get; init; }
+        public double Average { get; init; }
+    }
+
+    public sealed class LapTimeAnalyzer
+    {
+        /// <summary>Analyze lap times (in seconds) and return basic stats.</summary>
+        public LapStats Analyze(IEnumerable<double> lapTimes)
+        {
+            if (lapTimes is null) throw new ArgumentNullException(nameof(lapTimes));
+            var list = lapTimes.ToList();
+            if (list.Count == 0) throw new ArgumentException("Empty lap list.", nameof(lapTimes));
+
+            return new LapStats
+            {
+                Count = list.Count,
+                Best = list.Min(),
+                Worst = list.Max(),
+                Average = list.Average()
+            };
+        }
+    }
+}
